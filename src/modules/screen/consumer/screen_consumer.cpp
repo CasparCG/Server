@@ -545,7 +545,10 @@ struct screen_consumer_proxy : public core::frame_consumer
         consumer_.reset(new screen_consumer(config_, format_desc, channel_index));
     }
 
-    std::future<bool> send(core::const_frame frame) override { return consumer_->send(frame); }
+    std::future<bool> send(core::frame_timecode timecode, core::const_frame frame) override
+    {
+        return consumer_->send(frame);
+    }
 
     std::wstring print() const override { return consumer_ ? consumer_->print() : L"[screen_consumer]"; }
 

@@ -14,18 +14,13 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
- *
- * Author: Nicklas P Andersson
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.*
  */
 
 #pragma once
 
-#include "amcp_command_context.h"
-#include "amcp_command_repository_wrapper.h"
+namespace caspar { namespace IO {
 
-namespace caspar { namespace protocol { namespace amcp {
+std::size_t tokenize(const std::wstring& message, std::list<std::wstring>& pTokenVector);
 
-void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo);
-
-}}} // namespace caspar::protocol::amcp
+}} // namespace caspar::IO

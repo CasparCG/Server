@@ -158,7 +158,7 @@ void KeydataCommand::Execute()
     else if (state_ == 1)
         proxy->stop(layer_, 0);
     else if (state_ == 2)
-        pCIIStrategy_->GetChannel()->stage().clear();
+        pCIIStrategy_->GetChannel()->stage()->clear();
     else if (state_ == 3)
         proxy->play(layer_);
 }

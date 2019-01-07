@@ -23,112 +23,82 @@
 
 #include "../util/ClientInfo.h"
 #include "amcp_shared.h"
-#include <core/consumer/frame_consumer.h>
-#include <core/producer/frame_producer.h>
-
-#include <boost/algorithm/string.hpp>
 
 namespace caspar { namespace protocol { namespace amcp {
-
-struct command_context
-{
-    IO::ClientInfoPtr                                    client;
-    channel_context                                      channel;
-    int                                                  channel_index;
-    int                                                  layer_id;
-    std::vector<channel_context>                         channels;
-    spl::shared_ptr<core::cg_producer_registry>          cg_registry;
-    spl::shared_ptr<const core::frame_producer_registry> producer_registry;
-    spl::shared_ptr<const core::frame_consumer_registry> consumer_registry;
-    std::function<void(bool)>                            shutdown_server_now;
-    std::vector<std::wstring>                            parameters;
-    std::string                                          proxy_host;
-    std::string                                          proxy_port;
-
-    int layer_index(int default_ = 0) const { return layer_id == -1 ? default_ : layer_id; }
-
-    command_context(IO::ClientInfoPtr                                    client,
-                    channel_context                                      channel,
-                    int                                                  channel_index,
-                    int                                                  layer_id,
-                    std::vector<channel_context>                         channels,
-                    spl::shared_ptr<core::cg_producer_registry>          cg_registry,
-                    spl::shared_ptr<const core::frame_producer_registry> producer_registry,
-                    spl::shared_ptr<const core::frame_consumer_registry> consumer_registry,
-                    std::function<void(bool)>                            shutdown_server_now,
-                    std::string                                          proxy_host,
-                    std::string                                          proxy_port)
-        : client(std::move(client))
-        , channel(channel)
-        , channel_index(channel_index)
-        , layer_id(layer_id)
-        , channels(std::move(channels))
-        , cg_registry(std::move(cg_registry))
-        , producer_registry(std::move(producer_registry))
-        , consumer_registry(std::move(consumer_registry))
-        , shutdown_server_now(shutdown_server_now)
-        , proxy_host(std::move(proxy_host))
-        , proxy_port(std::move(proxy_port))
-    {
-    }
-};
-
-typedef std::function<std::wstring(command_context& args)> amcp_command_func;
 
 class AMCPCommand
 {
   private:
-    command_context   ctx_;
-    amcp_command_func command_;
-    int               min_num_params_;
-    std::wstring      name_;
-    std::wstring      replyString_;
-    std::wstring      request_id_;
+    const command_context_simple ctx_;
+    const amcp_command_func      command_;
+    const std::wstring           name_;
+    const std::wstring           request_id_;
 
   public:
-    AMCPCommand(const command_context&   ctx,
-                const amcp_command_func& command,
-                int                      min_num_params,
-                const std::wstring&      name)
+    AMCPCommand(const command_context_simple& ctx,
+                const amcp_command_func&      command,
+                const std::wstring&           name,
+                const std::wstring&           request_id)
+
         : ctx_(ctx)
         , command_(command)
-        , min_num_params_(min_num_params)
         , name_(name)
+        , request_id_(request_id)
     {
     }
 
     typedef std::shared_ptr<AMCPCommand> ptr_type;
 
-    bool Execute()
-    {
-        SetReplyString(command_(ctx_));
-        return true;
-    }
+    std::future<std::wstring> Execute(const std::vector<channel_context>& channels);
 
-    int minimum_parameters() const { return min_num_params_; }
+    void SendReply(const std::wstring& str, bool reply_without_req_id) const;
 
-    void SendReply()
-    {
-        if (replyString_.empty())
-            return;
+    std::wstring name() const { return name_; }
 
-        ctx_.client->send(std::move(replyString_));
-    }
-
-    std::vector<std::wstring>& parameters() { return ctx_.parameters; }
-
-    IO::ClientInfoPtr client() { return ctx_.client; }
-
-    std::wstring print() const { return name_; }
-
-    void set_request_id(std::wstring request_id) { request_id_ = std::move(request_id); }
-
-    void SetReplyString(const std::wstring& str)
-    {
-        if (request_id_.empty())
-            replyString_ = str;
-        else
-            replyString_ = L"RES " + request_id_ + L" " + str;
-    }
+    int channel_index() const { return ctx_.channel_index; }
 };
+
+class AMCPGroupCommand
+{
+    const std::vector<std::shared_ptr<AMCPCommand>> commands_;
+    const IO::ClientInfoPtrStd                      client_;
+    const std::wstring                              request_id_;
+    const bool                                      is_batch_;
+
+  public:
+    AMCPGroupCommand(const std::vector<std::shared_ptr<AMCPCommand>> commands,
+                     IO::ClientInfoPtrStd                            client,
+                     const std::wstring&                             request_id)
+        : commands_(commands)
+        , client_(client)
+        , request_id_(request_id)
+        , is_batch_(true)
+    {
+    }
+
+    AMCPGroupCommand(const std::vector<std::shared_ptr<AMCPCommand>> commands)
+        : commands_(commands)
+        , client_(nullptr)
+        , request_id_(L"")
+        , is_batch_(true)
+    {
+    }
+
+    AMCPGroupCommand(const std::shared_ptr<AMCPCommand> command)
+        : commands_({command})
+        , client_(nullptr)
+        , request_id_(L"")
+        , is_batch_(false)
+    {
+    }
+
+    bool HasClient() const { return !!client_; }
+
+    void SendReply(const std::wstring& str) const;
+
+    std::wstring name() const;
+
+    std::vector<std::shared_ptr<AMCPCommand>> Commands() const { return commands_; }
+};
+
 }}} // namespace caspar::protocol::amcp

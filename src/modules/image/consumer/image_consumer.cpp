@@ -66,7 +66,7 @@ struct image_consumer : public core::frame_consumer
 
     void initialize(const core::video_format_desc&, int) override {}
 
-    std::future<bool> send(core::const_frame frame) override
+    std::future<bool> send(core::frame_timecode timecode, core::const_frame frame) override
     {
         auto filename = filename_;
 

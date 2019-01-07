@@ -495,11 +495,15 @@ struct ffmpeg_consumer : public core::frame_consumer
         }
     }
 
+    bool is_initialized() { return frame_thread_.joinable(); }
+
     // frame consumer
 
-    void initialize(const core::video_format_desc& format_desc, int channel_index) override
+    void initialize_inner(const core::video_format_desc& format_desc,
+                          const core::frame_timecode     start_timecode,
+                          int                            channel_index)
     {
-        if (frame_thread_.joinable()) {
+        if (is_initialized()) {
             CASPAR_THROW_EXCEPTION(invalid_operation() << msg_info("Cannot reinitialize ffmpeg-consumer."));
         }
 
@@ -554,6 +558,14 @@ struct ffmpeg_consumer : public core::frame_consumer
                 }
 
                 CASPAR_SCOPE_EXIT { avformat_free_context(oc); };
+
+                if (start_timecode.is_valid()) {
+                    core::frame_timecode tc = start_timecode;
+                    if (format_desc_.field_count != 1)
+                        tc += 1;
+
+                    av_dict_set(&oc->metadata, "timecode", u8(tc.string(true)).c_str(), 0);
+                }
 
                 boost::optional<Stream> video_stream;
                 if (oc->oformat->video_codec != AV_CODEC_ID_NONE) {
@@ -682,8 +694,15 @@ struct ffmpeg_consumer : public core::frame_consumer
         });
     }
 
-    std::future<bool> send(core::const_frame frame) override
+    void initialize(const core::video_format_desc& format_desc, int channel_index) override
     {
+        initialize_inner(format_desc, core::frame_timecode::empty(), channel_index);
+    }
+
+    std::future<bool> send(core::frame_timecode timecode, core::const_frame frame) override
+    {
+        if (!is_initialized()) {
+        }
         {
             std::lock_guard<std::mutex> lock(exception_mutex_);
             if (exception_ != nullptr) {
@@ -714,6 +733,38 @@ struct ffmpeg_consumer : public core::frame_consumer
     }
 };
 
+struct ffmpeg_consumer_proxy : public ffmpeg_consumer
+{
+    core::video_format_desc format_desc_;
+    int                     channel_index_;
+
+    ffmpeg_consumer_proxy(std::string path, std::string args, bool realtime)
+        : ffmpeg_consumer(path, args, realtime)
+    {
+    }
+
+    void initialize(const core::video_format_desc& format_desc, int channel_index) override
+    {
+        if (realtime_) {
+            initialize_inner(format_desc_, core::frame_timecode::empty(), channel_index_);
+            return;
+        }
+
+        // Needs a timecode to initialize, so is left until first frame
+        format_desc_   = format_desc;
+        channel_index_ = channel_index;
+    }
+
+    std::future<bool> send(core::frame_timecode timecode, core::const_frame frame) override
+    {
+        if (!is_initialized()) {
+            initialize_inner(format_desc_, timecode, channel_index_);
+        }
+
+        return ffmpeg_consumer::send(timecode, frame);
+    }
+};
+
 spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wstring>&                  params,
                                                       std::vector<spl::shared_ptr<core::video_channel>> channels)
 {
@@ -725,15 +776,16 @@ spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wst
     for (auto n = 2; n < params.size(); ++n) {
         args.emplace_back(u8(params[n]));
     }
-    return spl::make_shared<ffmpeg_consumer>(path, boost::join(args, L" "), boost::iequals(params.at(0), L"STREAM"));
+    return spl::make_shared<ffmpeg_consumer_proxy>(
+        path, boost::join(args, L" "), boost::iequals(params.at(0), L"STREAM"));
 }
 
 spl::shared_ptr<core::frame_consumer>
 create_preconfigured_consumer(const boost::property_tree::wptree&               ptree,
                               std::vector<spl::shared_ptr<core::video_channel>> channels)
 {
-    return spl::make_shared<ffmpeg_consumer>(u8(ptree.get<std::wstring>(L"path", L"")),
-                                             u8(ptree.get<std::wstring>(L"args", L"")),
-                                             ptree.get(L"realtime", false));
+    return spl::make_shared<ffmpeg_consumer_proxy>(u8(ptree.get<std::wstring>(L"path", L"")),
+                                                   u8(ptree.get<std::wstring>(L"args", L"")),
+                                                   ptree.get(L"realtime", false));
 }
 }} // namespace caspar::ffmpeg

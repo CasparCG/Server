@@ -108,6 +108,10 @@ class separated_producer : public frame_producer
     std::wstring name() const override { return L"separated"; }
 
     core::monitor::state state() const override { return state_; }
+
+    const frame_timecode& timecode() override { return fill_producer_->timecode(); }
+    bool                  has_timecode() override { return fill_producer_->has_timecode(); }
+    bool                  provides_timecode() override { return fill_producer_->provides_timecode(); }
 };
 
 spl::shared_ptr<frame_producer> create_separated_producer(const spl::shared_ptr<frame_producer>& fill,

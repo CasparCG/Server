@@ -21,35 +21,25 @@
 
 #pragma once
 
-#include "../util/ProtocolStrategy.h"
-
-#include <core/producer/cg_proxy.h>
-#include <core/video_channel.h>
+#include "../util/ClientInfo.h"
 
 #include <common/memory.h>
 
-#include <boost/noncopyable.hpp>
+#include "AMCPCommandScheduler.h"
+#include "amcp_command_repository.h"
 
-#include <future>
 #include <string>
 
 namespace caspar { namespace protocol { namespace amcp {
 
-class AMCPProtocolStrategy
-    : public IO::IProtocolStrategy
-    , boost::noncopyable
-{
-  public:
-    AMCPProtocolStrategy(const std::wstring& name, const spl::shared_ptr<class amcp_command_repository>& repo);
+IO::protocol_strategy_factory<char>::ptr
+create_char_amcp_strategy_factory(const std::wstring&                             name,
+                                  const spl::shared_ptr<amcp_command_repository>& repo,
+                                  const spl::shared_ptr<AMCPCommandScheduler>&    scheduler);
 
-    virtual ~AMCPProtocolStrategy();
-
-    virtual void        Parse(const std::wstring& msg, IO::ClientInfoPtr pClientInfo);
-    virtual std::string GetCodepage() const { return "UTF-8"; }
-
-  private:
-    struct impl;
-    spl::unique_ptr<impl> impl_;
-};
+IO::protocol_strategy_factory<wchar_t>::ptr
+create_wchar_amcp_strategy_factory(const std::wstring&                             name,
+                                   const spl::shared_ptr<amcp_command_repository>& repo,
+                                   const spl::shared_ptr<AMCPCommandScheduler>&    scheduler);
 
 }}} // namespace caspar::protocol::amcp

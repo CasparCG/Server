@@ -798,7 +798,7 @@ struct bluefish_consumer_proxy : public core::frame_consumer
         });
     }
 
-    std::future<bool> send(core::const_frame frame) override
+    std::future<bool> send(core::frame_timecode timecode, core::const_frame frame) override
     {
         return executor_.begin_invoke([=] { return consumer_->send(frame); });
     }

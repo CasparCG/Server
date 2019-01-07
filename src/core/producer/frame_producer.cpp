@@ -88,6 +88,10 @@ const spl::shared_ptr<frame_producer>& frame_producer::empty()
         }
         draw_frame last_frame() { return draw_frame{}; }
         draw_frame first_frame() { return draw_frame{}; }
+
+        const frame_timecode& timecode() override { return frame_timecode::empty(); }
+        bool                  has_timecode() override { return false; }
+        bool                  provides_timecode() override { return false; }
     };
 
     static spl::shared_ptr<frame_producer> producer = spl::make_shared<empty_frame_producer>();
@@ -101,7 +105,6 @@ std::shared_ptr<executor>& producer_destroyer()
         result->set_capacity(std::numeric_limits<unsigned int>::max());
         return result;
     }();
-    ;
 
     return destroyer;
 }
@@ -179,6 +182,10 @@ class destroy_producer_proxy : public frame_producer
     draw_frame           last_frame() override { return producer_->last_frame(); }
     draw_frame           first_frame() override { return producer_->first_frame(); }
     core::monitor::state state() const override { return producer_->state(); }
+
+    const frame_timecode& timecode() override { return producer_->timecode(); }
+    bool                  has_timecode() override { return producer_->has_timecode(); }
+    bool                  provides_timecode() override { return producer_->provides_timecode(); }
 };
 
 spl::shared_ptr<core::frame_producer> create_destroy_proxy(spl::shared_ptr<core::frame_producer> producer)

@@ -2,10 +2,14 @@ cmake_minimum_required (VERSION 2.6)
 project (protocol)
 
 set(SOURCES
+		amcp/AMCPCommand.cpp
 		amcp/AMCPCommandQueue.cpp
+		amcp/AMCPCommandScheduler.cpp
 		amcp/AMCPCommandsImpl.cpp
+		amcp/AMCPCommandsImplTimecode.cpp
 		amcp/AMCPProtocolStrategy.cpp
 		amcp/amcp_command_repository.cpp
+		amcp/amcp_command_repository_wrapper.cpp
 
 		cii/CIICommandsImpl.cpp
 		cii/CIIProtocolStrategy.cpp
@@ -25,16 +29,21 @@ set(SOURCES
 		util/lock_container.cpp
 		util/strategy_adapters.cpp
 		util/http_request.cpp
+		util/tokenize.cpp
 
 		StdAfx.cpp
 )
 set(HEADERS
 		amcp/AMCPCommand.h
 		amcp/AMCPCommandQueue.h
+		amcp/AMCPCommandScheduler.h
 		amcp/AMCPCommandsImpl.h
+		amcp/AMCPCommandsImplTimecode.h
 		amcp/AMCPProtocolStrategy.h
 		amcp/amcp_command_repository.h
+		amcp/amcp_command_repository_wrapper.h
 		amcp/amcp_shared.h
+		amcp/amcp_command_context.h
 
 		cii/CIICommand.h
 		cii/CIICommandsImpl.h
@@ -62,6 +71,7 @@ set(HEADERS
 		util/protocol_strategy.h
 		util/strategy_adapters.h
 		util/http_request.h
+		util/tokenize.h
 
 		StdAfx.h
 )

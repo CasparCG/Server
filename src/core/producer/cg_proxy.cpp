@@ -125,7 +125,7 @@ struct cg_producer_registry::impl
 
     spl::shared_ptr<cg_proxy> get_proxy(const spl::shared_ptr<video_channel>& video_channel, int render_layer) const
     {
-        auto producer = spl::make_shared_ptr(video_channel->stage().foreground(render_layer).get());
+        auto producer = spl::make_shared_ptr(video_channel->stage()->foreground(render_layer).get());
 
         return get_proxy(producer);
     }
@@ -142,7 +142,7 @@ struct cg_producer_registry::impl
         if (!found)
             return cg_proxy::empty();
 
-        auto producer              = spl::make_shared_ptr(video_channel->stage().foreground(render_layer).get());
+        auto producer              = spl::make_shared_ptr(video_channel->stage()->foreground(render_layer).get());
         auto current_producer_name = producer->name();
         bool create_new            = current_producer_name != found->name || !found->reusable_producer_instance;
 
@@ -152,8 +152,8 @@ struct cg_producer_registry::impl
             diagnostics::call_context::for_thread().layer         = render_layer;
 
             producer = found->producer_factory(dependencies, filename);
-            video_channel->stage().load(render_layer, producer);
-            video_channel->stage().play(render_layer);
+            video_channel->stage()->load(render_layer, producer);
+            video_channel->stage()->play(render_layer);
         }
 
         return found->proxy_factory(producer);

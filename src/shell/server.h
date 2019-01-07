@@ -21,6 +21,7 @@
 
 #pragma once
 
+#include <protocol/amcp/AMCPCommandScheduler.h>
 #include <protocol/amcp/amcp_command_repository.h>
 
 #include <boost/noncopyable.hpp>
@@ -36,6 +37,7 @@ class server final : public boost::noncopyable
     explicit server(std::function<void(bool)> shutdown_server_now);
     void                                                     start();
     spl::shared_ptr<protocol::amcp::amcp_command_repository> get_amcp_command_repository() const;
+    spl::shared_ptr<protocol::amcp::AMCPCommandScheduler>    get_amcp_command_scheduler() const;
 
   private:
     struct impl;

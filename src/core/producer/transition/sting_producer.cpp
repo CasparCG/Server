@@ -69,10 +69,10 @@ class sting_producer : public frame_producer
 
     void leading_producer(const spl::shared_ptr<frame_producer>& producer) override { src_producer_ = producer; }
 
-    spl::shared_ptr<frame_producer> following_producer() const override
+    spl::shared_ptr<frame_producer> following_producer(bool peek) const override
     {
         auto duration = auto_play_delta();
-        return duration && current_frame_ >= *duration ? dst_producer_ : core::frame_producer::empty();
+        return peek || (duration && current_frame_ >= *duration) ? dst_producer_ : core::frame_producer::empty();
     }
 
     boost::optional<int64_t> auto_play_delta() const override

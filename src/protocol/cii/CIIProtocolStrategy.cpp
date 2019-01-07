@@ -189,8 +189,8 @@ void CIIProtocolStrategy::WriteTemplateData(const std::wstring& templateName,
 void CIIProtocolStrategy::DisplayTemplate(const std::wstring& titleName)
 {
     try {
-        pChannel_->stage().load(0, GetPreparedTemplate(titleName));
-        pChannel_->stage().play(0);
+        pChannel_->stage()->load(0, GetPreparedTemplate(titleName));
+        pChannel_->stage()->play(0);
 
         CASPAR_LOG(info) << L"Displayed title " << titleName;
     } catch (caspar_exception&) {
@@ -212,14 +212,14 @@ void CIIProtocolStrategy::DisplayMediaFile(const std::wstring& filename)
     auto pTransition = create_transition_producer(pFP, transition);
 
     try {
-        pChannel_->stage().load(0, pTransition);
+        pChannel_->stage()->load(0, pTransition);
     } catch (...) {
         CASPAR_LOG_CURRENT_EXCEPTION();
         CASPAR_LOG(error) << L"Failed to display " << filename;
         return;
     }
 
-    pChannel_->stage().play(0);
+    pChannel_->stage()->play(0);
 
     CASPAR_LOG(info) << L"Displayed " << filename;
 }

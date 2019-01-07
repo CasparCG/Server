@@ -31,6 +31,7 @@
 namespace caspar { namespace IO {
 
 typedef spl::shared_ptr<client_connection<wchar_t>> ClientInfoPtr;
+typedef std::shared_ptr<client_connection<wchar_t>> ClientInfoPtrStd;
 
 struct ConsoleClientInfo : public client_connection<wchar_t>
 {

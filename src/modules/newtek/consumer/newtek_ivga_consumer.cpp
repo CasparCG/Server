@@ -88,7 +88,7 @@ struct newtek_ivga_consumer : public core::frame_consumer
         CASPAR_VERIFY(air_send_);
     }
 
-    std::future<bool> send(core::const_frame frame) override
+    std::future<bool> send(core::frame_timecode timecode, core::const_frame frame) override
     {
         CASPAR_VERIFY(format_desc_.height * format_desc_.width * 4 == frame.image_data(0).size());
 

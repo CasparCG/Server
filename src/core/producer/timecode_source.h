@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011 Sveriges Television AB <info@casparcg.com>
+ * Copyright (c) 2018 Norsk rikskringkasting AS
  *
  * This file is part of CasparCG (www.casparcg.com).
  *
@@ -16,32 +16,26 @@
  * You should have received a copy of the GNU General Public License
  * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
  *
- * Author: Nicklas P Andersson
+ * Author: Julian Waller, julian@superfly.tv
  */
 
 #pragma once
 
-#include "AMCPCommand.h"
+#include <core/frame/frame_timecode.h>
 
-#include <common/executor.h>
-#include <common/memory.h>
+namespace caspar { namespace core {
 
-namespace caspar { namespace protocol { namespace amcp {
-
-class AMCPCommandQueue
+// Interface
+class timecode_source
 {
   public:
-    typedef spl::shared_ptr<AMCPCommandQueue> ptr_type;
+    virtual ~timecode_source() = default;
 
-    AMCPCommandQueue(const std::wstring& name, const std::vector<channel_context>& channels);
-    ~AMCPCommandQueue();
+    virtual const frame_timecode& timecode()          = 0;
+    virtual bool                  has_timecode()      = 0;
+    virtual bool                  provides_timecode() = 0;
 
-    void AddCommand(std::shared_ptr<AMCPGroupCommand> command);
-    void Execute(std::shared_ptr<AMCPGroupCommand> cmd) const;
-
-  private:
-    executor                            executor_;
-    const std::vector<channel_context>& channels_;
+    virtual std::wstring print() const = 0;
 };
 
-}}} // namespace caspar::protocol::amcp
+}} // namespace caspar::core

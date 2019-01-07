@@ -40,6 +40,7 @@
 #include <core/frame/draw_frame.h>
 #include <core/frame/frame.h>
 #include <core/frame/frame_factory.h>
+#include <core/frame/frame_timecode.h>
 #include <core/frame/frame_transform.h>
 #include <core/frame/pixel_format.h>
 #include <core/mixer/audio/audio_mixer.h>
@@ -305,8 +306,8 @@ class decklink_producer : public IDeckLinkInputCallback
     bool freeze_on_lost_;
     bool has_signal_;
 
-    tbb::concurrent_bounded_queue<core::draw_frame> frame_buffer_;
-    core::draw_frame                                last_frame_;
+    tbb::concurrent_bounded_queue<std::pair<core::frame_timecode, core::draw_frame>> frame_buffer_;
+    std::pair<core::frame_timecode, core::draw_frame>                                last_frame_;
 
     std::exception_ptr exception_;
 
@@ -425,6 +426,8 @@ class decklink_producer : public IDeckLinkInputCallback
             BMDTimeValue in_video_pts = 0LL;
             BMDTimeValue in_audio_pts = 0LL;
 
+            auto new_timecode = core::frame_timecode::empty();
+
             if (video) {
                 const auto flags = video->GetFlags();
                 has_signal_      = !(flags & bmdFrameHasNoInputSource);
@@ -460,6 +463,22 @@ class decklink_producer : public IDeckLinkInputCallback
                         FF(av_buffersrc_write_frame(audio_filter_.video_source, src.get()));
                     }
                 }
+
+                {
+                    IDeckLinkTimecode* tc;
+                    if (SUCCEEDED(video->GetTimecode(bmdTimecodeRP188Any, &tc)) && tc) {
+                        uint8_t hours, minutes, seconds, frames;
+                        if (SUCCEEDED(tc->GetComponents(&hours, &minutes, &seconds, &frames))) {
+                            const uint8_t fps = static_cast<uint8_t>(ceil(format_desc_.fps));
+                            if (core::frame_timecode::create(
+                                    hours, minutes, seconds, frames, fps, true, new_timecode)) {
+                                state_["file/timecode"] = new_timecode.string(true);
+                            }
+                        }
+
+                        tc->Release();
+                    }
+                }
             }
 
             if (audio) {
@@ -488,6 +507,12 @@ class decklink_producer : public IDeckLinkInputCallback
                         FF(av_buffersrc_write_frame(audio_filter_.audio_source, src.get()));
                     }
                 }
+            }
+
+            if (new_timecode != core::frame_timecode::empty())
+            {
+                // Account for latency introduced by ffmpeg filter
+                new_timecode = new_timecode - (format_desc_.field_count > 1 ? 3 : 1);
             }
 
             while (true) {
@@ -519,8 +544,6 @@ class decklink_producer : public IDeckLinkInputCallback
                 auto video_tb = av_buffersink_get_time_base(video_filter_.sink);
                 auto audio_tb = av_buffersink_get_time_base(audio_filter_.sink);
 
-                CASPAR_LOG(debug) << av_video->pts << " " << av_audio->pts;
-
                 auto in_sync = static_cast<double>(in_video_pts) / AV_TIME_BASE -
                                static_cast<double>(in_audio_pts) / format_desc_.audio_sample_rate;
                 auto out_sync = static_cast<double>(av_video->pts * video_tb.num) / video_tb.den -
@@ -539,9 +562,10 @@ class decklink_producer : public IDeckLinkInputCallback
                 graph_->set_value("in-sync", in_sync * 2.0 + 0.5);
                 graph_->set_value("out-sync", out_sync * 2.0 + 0.5);
 
-                auto frame = core::draw_frame(make_frame(this, *frame_factory_, av_video, av_audio));
+                auto frame = std::make_pair(new_timecode,
+                                            core::draw_frame(make_frame(this, *frame_factory_, av_video, av_audio)));
                 if (!frame_buffer_.try_push(frame)) {
-                    core::draw_frame dummy;
+                    std::pair<core::frame_timecode, core::draw_frame> dummy;
                     frame_buffer_.try_pop(dummy);
                     frame_buffer_.try_push(frame);
                     graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
@@ -563,11 +587,11 @@ class decklink_producer : public IDeckLinkInputCallback
             std::rethrow_exception(exception_);
         }
 
-        core::draw_frame frame;
+        auto frame = last_frame_;
 
         if (!frame_buffer_.try_pop(frame)) {
             if (freeze_on_lost_)
-                frame = last_frame_;
+                frame = std::make_pair(core::frame_timecode::empty(), last_frame_.second);
             graph_->set_tag(diagnostics::tag_severity::WARNING, "late-frame");
         } else {
             last_frame_ = frame;
@@ -576,7 +600,7 @@ class decklink_producer : public IDeckLinkInputCallback
         graph_->set_value("output-buffer",
                           static_cast<float>(frame_buffer_.size()) / static_cast<float>(frame_buffer_.capacity()));
 
-        return frame;
+        return frame.second;
     }
 
     std::wstring print() const
@@ -591,6 +615,9 @@ class decklink_producer : public IDeckLinkInputCallback
         std::lock_guard<std::mutex> lock(state_mutex_);
         return state_;
     }
+
+    const core::frame_timecode& timecode() const { return last_frame_.first; }
+    bool                        has_timecode() const { return last_frame_.first != core::frame_timecode::empty(); }
 };
 
 class decklink_producer_proxy : public core::frame_producer
@@ -642,6 +669,10 @@ class decklink_producer_proxy : public core::frame_producer
     std::wstring name() const override { return L"decklink"; }
 
     boost::rational<int> get_out_framerate() const { return producer_->get_out_framerate(); }
+
+    const core::frame_timecode& timecode() override { return producer_->timecode(); }
+    bool                        has_timecode() override { return producer_->has_timecode(); }
+    bool                        provides_timecode() override { return true; }
 };
 
 spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer_dependencies& dependencies,
