@@ -54,7 +54,17 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     std::map<int, layer>                layers_;
     std::map<int, tweened_transform>    tweens_;
 
-    executor executor_{L"stage " + boost::lexical_cast<std::wstring>(channel_index_)};
+    executor   executor_{L"stage " + boost::lexical_cast<std::wstring>(channel_index_)};
+    std::mutex lock_;
+
+    layer& get_layer(int index)
+    {
+        auto it = layers_.find(index);
+        if (it == std::end(layers_)) {
+            it = layers_.emplace(index, layer()).first;
+        }
+        return it->second;
+    }
 
   public:
     impl(int channel_index, spl::shared_ptr<diagnostics::graph> graph)
@@ -99,15 +109,6 @@ struct stage::impl : public std::enable_shared_from_this<impl>
 
             return frames;
         });
-    }
-
-    layer& get_layer(int index)
-    {
-        auto it = layers_.find(index);
-        if (it == std::end(layers_)) {
-            it = layers_.emplace(index, layer()).first;
-        }
-        return it->second;
     }
 
     std::future<void>
@@ -186,9 +187,9 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         return executor_.begin_invoke([=] { layers_.clear(); });
     }
 
-    std::future<void> swap_layers(stage& other, bool swap_transforms)
+    std::future<void> swap_layers(const std::shared_ptr<stage>& other, bool swap_transforms)
     {
-        auto other_impl = other.impl_;
+        auto other_impl = other->impl_;
 
         if (other_impl.get() == this) {
             return make_ready_future();
@@ -217,9 +218,9 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         });
     }
 
-    std::future<void> swap_layer(int index, int other_index, stage& other, bool swap_transforms)
+    std::future<void> swap_layer(int index, int other_index, const std::shared_ptr<stage>& other, bool swap_transforms)
     {
-        auto other_impl = other.impl_;
+        auto other_impl = other->impl_;
 
         if (other_impl.get() == this)
             return swap_layer(index, other_index, swap_transforms);
@@ -241,9 +242,9 @@ struct stage::impl : public std::enable_shared_from_this<impl>
         }
     }
 
-    std::future<void> invoke_both(stage& other, std::function<void()> func)
+    std::future<void> invoke_both(const std::shared_ptr<stage>& other, std::function<void()> func)
     {
-        auto other_impl = other.impl_;
+        auto other_impl = other->impl_;
 
         if (other_impl->channel_index_ < channel_index_) {
             return other_impl->executor_.begin_invoke([=] { executor_.invoke(func); });
@@ -268,6 +269,8 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     {
         return flatten(executor_.begin_invoke([=] { return get_layer(index).foreground()->call(params).share(); }));
     }
+
+    std::unique_lock<std::mutex> get_lock() { return std::move(std::unique_lock<std::mutex>(lock_)); }
 };
 
 stage::stage(int channel_index, spl::shared_ptr<diagnostics::graph> graph)
@@ -302,17 +305,20 @@ std::future<void> stage::play(int index) { return impl_->play(index); }
 std::future<void> stage::stop(int index) { return impl_->stop(index); }
 std::future<void> stage::clear(int index) { return impl_->clear(index); }
 std::future<void> stage::clear() { return impl_->clear(); }
-std::future<void> stage::swap_layers(stage& other, bool swap_transforms)
+std::future<void> stage::swap_layers(const std::shared_ptr<stage_base>& other, bool swap_transforms)
 {
-    return impl_->swap_layers(other, swap_transforms);
+    const auto other2 = std::static_pointer_cast<stage>(other);
+    return impl_->swap_layers(other2, swap_transforms);
 }
 std::future<void> stage::swap_layer(int index, int other_index, bool swap_transforms)
 {
     return impl_->swap_layer(index, other_index, swap_transforms);
 }
-std::future<void> stage::swap_layer(int index, int other_index, stage& other, bool swap_transforms)
+std::future<void>
+stage::swap_layer(int index, int other_index, const std::shared_ptr<stage_base>& other, bool swap_transforms)
 {
-    return impl_->swap_layer(index, other_index, other, swap_transforms);
+    const auto other2 = std::static_pointer_cast<stage>(other);
+    return impl_->swap_layer(index, other_index, other2, swap_transforms);
 }
 std::future<std::shared_ptr<frame_producer>> stage::foreground(int index) { return impl_->foreground(index); }
 std::future<std::shared_ptr<frame_producer>> stage::background(int index) { return impl_->background(index); }
@@ -321,5 +327,113 @@ std::map<int, layer_frame>                   stage::
 {
     return (*impl_)(format_desc, nb_samples, fetch_background);
 }
-core::monitor::state stage::state() const { return impl_->state_; }
+core::monitor::state         stage::state() const { return impl_->state_; }
+std::unique_lock<std::mutex> stage::get_lock() const { return impl_->get_lock(); }
+std::future<void>            stage::execute(std::function<void()> func)
+{
+    func();
+    return make_ready_future();
+}
+
+// STAGE DELAYED (For batching operations)
+stage_delayed::stage_delayed(std::shared_ptr<stage>& st, int index)
+    : executor_{L"batch stage " + boost::lexical_cast<std::wstring>(index)}
+    , stage_(st)
+{
+    executor_.begin_invoke([=]() -> void { waiter_.get_future().get(); });
+}
+
+std::future<std::wstring> stage_delayed::call(int index, const std::vector<std::wstring>& params)
+{
+    return executor_.begin_invoke([=]() -> std::wstring { return stage_->call(index, params).get(); });
+}
+std::future<void> stage_delayed::apply_transforms(const std::vector<stage_delayed::transform_tuple_t>& transforms)
+{
+    return executor_.begin_invoke([=]() { return stage_->apply_transforms(transforms).get(); });
+}
+std::future<void>
+stage_delayed::apply_transform(int                                                                index,
+                               const std::function<core::frame_transform(core::frame_transform)>& transform,
+                               unsigned int                                                       mix_duration,
+                               const tweener&                                                     tween)
+{
+    return executor_.begin_invoke(
+        [=]() { return stage_->apply_transform(index, transform, mix_duration, tween).get(); });
+}
+std::future<void> stage_delayed::clear_transforms(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->clear_transforms(index).get(); });
+}
+std::future<void> stage_delayed::clear_transforms()
+{
+    return executor_.begin_invoke([=]() { return stage_->clear_transforms().get(); });
+}
+std::future<frame_transform> stage_delayed::get_current_transform(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->get_current_transform(index).get(); });
+}
+std::future<void>
+stage_delayed::load(int index, const spl::shared_ptr<frame_producer>& producer, bool preview, bool auto_play)
+{
+    return executor_.begin_invoke([=]() { return stage_->load(index, producer, preview, auto_play).get(); });
+}
+std::future<void> stage_delayed::pause(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->pause(index).get(); });
+}
+std::future<void> stage_delayed::resume(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->resume(index).get(); });
+}
+std::future<void> stage_delayed::play(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->play(index).get(); });
+}
+std::future<void> stage_delayed::stop(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->stop(index).get(); });
+}
+std::future<void> stage_delayed::clear(int index)
+{
+    return executor_.begin_invoke([=]() { return stage_->clear(index).get(); });
+}
+std::future<void> stage_delayed::clear()
+{
+    return executor_.begin_invoke([=]() { return stage_->clear().get(); });
+}
+std::future<void> stage_delayed::swap_layers(const std::shared_ptr<stage_base>& other, bool swap_transforms)
+{
+    const auto other2 = std::static_pointer_cast<stage_delayed>(other);
+    return executor_.begin_invoke([=]() { return stage_->swap_layers(other2->stage_, swap_transforms).get(); });
+}
+std::future<void> stage_delayed::swap_layer(int index, int other_index, bool swap_transforms)
+{
+    return executor_.begin_invoke([=]() { return stage_->swap_layer(index, other_index, swap_transforms).get(); });
+}
+std::future<void>
+stage_delayed::swap_layer(int index, int other_index, const std::shared_ptr<stage_base>& other, bool swap_transforms)
+{
+    const auto other2 = std::static_pointer_cast<stage_delayed>(other);
+
+    // Something so that we know to lock the channel
+    other2->executor_.begin_invoke([]() {});
+
+    return executor_.begin_invoke(
+        [=]() { return stage_->swap_layer(index, other_index, other2->stage_, swap_transforms).get(); });
+}
+
+std::future<std::shared_ptr<frame_producer>> stage_delayed::foreground(int index)
+{
+    return executor_.begin_invoke([=]() -> std::shared_ptr<frame_producer> { return stage_->foreground(index).get(); });
+}
+std::future<std::shared_ptr<frame_producer>> stage_delayed::background(int index)
+{
+    return executor_.begin_invoke([=]() -> std::shared_ptr<frame_producer> { return stage_->background(index).get(); });
+}
+
+std::future<void> stage_delayed::execute(std::function<void()> func)
+{
+    return executor_.begin_invoke([=]() { return stage_->execute(func).get(); });
+}
+
 }} // namespace caspar::core

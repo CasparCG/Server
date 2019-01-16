@@ -70,7 +70,7 @@ struct video_channel::impl final
     caspar::core::output         output_;
     spl::shared_ptr<image_mixer> image_mixer_;
     caspar::core::mixer          mixer_;
-    caspar::core::stage          stage_;
+    std::shared_ptr<core::stage> stage_;
 
     std::vector<int> audio_cadence_ = format_desc_.audio_cadence;
 
@@ -92,7 +92,7 @@ struct video_channel::impl final
         , output_(graph_, format_desc, index)
         , image_mixer_(std::move(image_mixer))
         , mixer_(index, graph_, image_mixer_)
-        , stage_(index, graph_)
+        , stage_(std::make_shared<core::stage>(index, graph_))
         , tick_(tick)
     {
         graph_->set_color("produce-time", caspar::diagnostics::color(0.0f, 1.0f, 0.0f));
@@ -142,7 +142,7 @@ struct video_channel::impl final
 
                     // Produce
                     caspar::timer produce_timer;
-                    auto          stage_frames = stage_(format_desc, nb_samples, background_routes);
+                    auto          stage_frames = (*stage_)(format_desc, nb_samples, background_routes);
                     graph_->set_value("produce-time", produce_timer.elapsed() * format_desc.fps * 0.5);
 
                     // Mix
@@ -193,7 +193,7 @@ struct video_channel::impl final
                     }
 
                     monitor::state state = {};
-                    state["stage"]       = stage_.state();
+                    state["stage"]       = stage_->state();
                     state["mixer"]       = mixer_.state();
                     state["output"]      = output_.state();
                     state["framerate"]   = {format_desc_.framerate.numerator(), format_desc_.framerate.denominator()};
@@ -254,7 +254,7 @@ struct video_channel::impl final
         std::lock_guard<std::mutex> lock(format_desc_mutex_);
         format_desc_   = format_desc;
         audio_cadence_ = format_desc_.audio_cadence;
-        stage_.clear();
+        stage_->clear();
     }
 
     std::wstring print() const
@@ -273,15 +273,15 @@ video_channel::video_channel(int                                       index,
 {
 }
 video_channel::~video_channel() {}
-const stage&                   video_channel::stage() const { return impl_->stage_; }
-stage&                         video_channel::stage() { return impl_->stage_; }
-const mixer&                   video_channel::mixer() const { return impl_->mixer_; }
-mixer&                         video_channel::mixer() { return impl_->mixer_; }
-const output&                  video_channel::output() const { return impl_->output_; }
-output&                        video_channel::output() { return impl_->output_; }
-spl::shared_ptr<frame_factory> video_channel::frame_factory() { return impl_->image_mixer_; }
-core::video_format_desc        video_channel::video_format_desc() const { return impl_->video_format_desc(); }
-void                           core::video_channel::video_format_desc(const core::video_format_desc& format_desc)
+const std::shared_ptr<core::stage>& video_channel::stage() const { return impl_->stage_; }
+std::shared_ptr<core::stage>&       video_channel::stage() { return impl_->stage_; }
+const mixer&                        video_channel::mixer() const { return impl_->mixer_; }
+mixer&                              video_channel::mixer() { return impl_->mixer_; }
+const output&                       video_channel::output() const { return impl_->output_; }
+output&                             video_channel::output() { return impl_->output_; }
+spl::shared_ptr<frame_factory>      video_channel::frame_factory() { return impl_->image_mixer_; }
+core::video_format_desc             video_channel::video_format_desc() const { return impl_->video_format_desc(); }
+void                                core::video_channel::video_format_desc(const core::video_format_desc& format_desc)
 {
     impl_->video_format_desc(format_desc);
 }

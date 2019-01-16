@@ -112,13 +112,8 @@ auto run(const std::wstring& config_file_name, std::atomic<bool>& should_wait_fo
     // Create a dummy client which prints amcp responses to console.
     auto console_client = spl::make_shared<IO::ConsoleClientInfo>();
 
-    // Create a amcp parser for console commands.
-    std::shared_ptr<IO::protocol_strategy<wchar_t>> amcp =
-        spl::make_shared<caspar::IO::delimiter_based_chunking_strategy_factory<wchar_t>>(
-            L"\r\n",
-            spl::make_shared<caspar::IO::legacy_strategy_adapter_factory>(
-                spl::make_shared<protocol::amcp::AMCPProtocolStrategy>(L"Console",
-                                                                       caspar_server->get_amcp_command_repository())))
+    auto amcp =
+        protocol::amcp::create_wchar_amcp_strategy_factory(L"Console", caspar_server->get_amcp_command_repository())
             ->create(console_client);
 
     // Use separate thread for the blocking console input, will be terminated

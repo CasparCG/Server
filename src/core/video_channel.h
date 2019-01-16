@@ -78,12 +78,12 @@ class video_channel final
 
     core::monitor::state state() const;
 
-    const core::stage&  stage() const;
-    core::stage&        stage();
-    const core::mixer&  mixer() const;
-    core::mixer&        mixer();
-    const core::output& output() const;
-    core::output&       output();
+    const std::shared_ptr<core::stage>& stage() const;
+    std::shared_ptr<core::stage>&       stage();
+    const core::mixer&                  mixer() const;
+    core::mixer&                        mixer();
+    const core::output&                 output() const;
+    core::output&                       output();
 
     core::video_format_desc video_format_desc() const;
     void                    video_format_desc(const core::video_format_desc& format_desc);

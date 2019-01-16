@@ -14,27 +14,13 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.
- *
- * Author: Nicklas P Andersson
+ * along with CasparCG. If not, see <http://www.gnu.org/licenses/>.*
  */
 
 #pragma once
 
-#include "../util/ClientInfo.h"
+namespace caspar { namespace IO {
 
-#include <common/memory.h>
+std::size_t tokenize(const std::wstring& message, std::list<std::wstring>& pTokenVector);
 
-#include "amcp_command_repository.h"
-
-#include <string>
-
-namespace caspar { namespace protocol { namespace amcp {
-
-IO::protocol_strategy_factory<char>::ptr
-create_char_amcp_strategy_factory(const std::wstring& name, const spl::shared_ptr<amcp_command_repository>& repo);
-
-IO::protocol_strategy_factory<wchar_t>::ptr
-create_wchar_amcp_strategy_factory(const std::wstring& name, const spl::shared_ptr<amcp_command_repository>& repo);
-
-}}} // namespace caspar::protocol::amcp
+}} // namespace caspar::IO
