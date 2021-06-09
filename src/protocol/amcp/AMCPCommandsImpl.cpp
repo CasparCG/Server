@@ -636,6 +636,11 @@ std::wstring cg_remove_command(command_context& ctx)
     int layer = std::stoi(ctx.parameters.at(0));
     get_expected_cg_proxy(ctx)->remove(layer);
 
+    auto producer = spl::make_shared_ptr(
+        ctx.channel.channel->stage().foreground(ctx.layer_index(core::cg_proxy::DEFAULT_LAYER)).get());
+    if (0 == producer->name().compare(L"html"))
+        ctx.channel.channel->stage().clear(ctx.layer_index(core::cg_proxy::DEFAULT_LAYER));
+
     return L"202 CG OK\r\n";
 }
 

@@ -312,7 +312,10 @@ class cef_task : public CefTask
     IMPLEMENT_REFCOUNTING(cef_task);
 };
 
-void invoke(const std::function<void()>& func) { begin_invoke(func).get(); }
+void invoke(const std::function<void()>& func) {
+    if (g_cef_executor != nullptr)
+        begin_invoke(func).get();
+}
 
 std::future<void> begin_invoke(const std::function<void()>& func)
 {
