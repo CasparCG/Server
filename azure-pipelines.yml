@@ -1,0 +1,69 @@
+jobs:
+- job: ubuntu_1804_docker
+  displayName: 'Ubuntu 18.04'
+  strategy:
+    matrix:
+      Default: {}
+      Clang:
+        CC: clang
+        CXX: clang++
+  pool:
+    vmImage: 'ubuntu-16.04'
+  steps:
+  - checkout: self
+    clean: false
+    fetchDepth: 1
+    lfs: false
+  - bash: |
+      export PROC_COUNT=$(nproc)
+      ./tools/linux/ensure-base-images
+      ./tools/linux/build-in-docker
+    #   ./tools/linux/extract-from-docker
+    displayName: 'build in docker'
+#   - task: ArchiveFiles@2
+#     inputs:
+#       rootFolderOrFile: 'casparcg_server'
+#       archiveType: 'zip' # Options: zip, 7z, tar, wim
+#       archiveFile: 'artifacts/casparcg_server_linux.zip'
+#     displayName: 'make archive'
+# TODO - publish zip to ftp/similar
+
+- job: windows
+  displayName: 'Windows VS2017'
+  pool:
+    vmImage: 'vs2017-win2016'
+  steps:
+  - checkout: self
+    clean: false
+    fetchDepth: 1
+    lfs: false
+  - task: CMake@1
+    inputs:
+      workingDirectory: "$(Build.BinariesDirectory)"
+      cmakeArgs: "-A x64 $(Build.SourcesDirectory)/src"
+    displayName: 'prepare build'
+  - task: NuGetCommand@2
+    inputs:
+      command: 'restore'
+      restoreSolution: '$(Build.BinariesDirectory)/CasparCG Server.sln'
+    displayName: 'nuget restore'
+  - task: VSBuild@1
+    inputs:
+      solution: '$(Build.BinariesDirectory)/CasparCG Server.sln'
+      vsVersion: 15.0
+      configuration: Release
+      msbuildArchitecture: 'x64'
+    displayName: 'build'
+#   - script: |
+#       cd $(Build.BinariesDirectory)
+#       set SERVER_FOLDER=CasparCG Server
+
+#       $(Build.SourcesDirectory)\tools\windows\package.bat $(Build.SourcesDirectory)
+#     displayName: 'prepare archive'
+#   - task: ArchiveFiles@2
+#     inputs:
+#       rootFolderOrFile: '$(Build.BinariesDirectory)\CasparCG Server'
+#       archiveType: 'zip' # Options: zip, 7z, tar, wim
+#       archiveFile: 'artifacts/casparcg_server_windows.zip'
+#     displayName: 'make archive'
+# TODO - publish zip to ftp/similar

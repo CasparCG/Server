@@ -107,7 +107,7 @@ add_custom_command(TARGET casparcg_copy_dependencies POST_BUILD COMMAND ${CMAKE_
 
 if (MSVC)
 	foreach(FILE_TO_COPY ${CASPARCG_RUNTIME_DEPENDENCIES})
-		if(IS_DIRECTORY ${FILE_TO_COPY})
+		if(IS_DIRECTORY ${FILE_TO_COPY}) # TODO - this check isnt working reliably.
 			get_filename_component(FOLDER_NAME "${FILE_TO_COPY}" NAME)
 			add_custom_command(TARGET casparcg_copy_dependencies POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory \"${FILE_TO_COPY}\" \"${OUTPUT_FOLDER}/${FOLDER_NAME}\")
 			add_custom_command(TARGET casparcg_copy_dependencies POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_directory \"${FILE_TO_COPY}\" \"${CMAKE_CURRENT_BINARY_DIR}/${FOLDER_NAME}\")

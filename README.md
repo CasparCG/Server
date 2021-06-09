@@ -1,6 +1,8 @@
 CasparCG Server
 ===============
 
+[![Build Status](https://dev.azure.com/julusian/casparcg/_apis/build/status/Julusian.CasparCG-Server?branchName=azure-pipelines)](https://dev.azure.com/julusian/casparcg/_build/latest?definitionId=1?branchName=azure-pipelines)
+
 Thank you for your interest in CasparCG Server, a professional software used to
 play out and record professional graphics, audio and video to multiple outputs.
 CasparCG Server has been in 24/7 broadcast production since 2006.
