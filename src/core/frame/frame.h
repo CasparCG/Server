@@ -46,6 +46,8 @@ class mutable_frame final
 
     std::size_t height() const;
 
+    const void* stream_tag() const;
+
     class frame_geometry&       geometry();
     const class frame_geometry& geometry() const;
 
@@ -79,6 +81,9 @@ class const_frame final
     std::size_t height() const;
 
     std::size_t size() const;
+
+    const void* stream_tag() const;
+    const_frame with_tag(const void* new_tag) const;
 
     const boost::any& opaque() const;
 

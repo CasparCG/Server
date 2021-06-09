@@ -158,7 +158,7 @@ struct oal_consumer : public core::frame_consumer
         graph_->set_text(print());
 
         executor_.begin_invoke([=] {
-            duration_ = format_desc_.audio_cadence[0];
+            duration_ = *std::min_element(format_desc_.audio_cadence.begin(), format_desc_.audio_cadence.end());
             buffers_.resize(8);
             alGenBuffers(static_cast<ALsizei>(buffers_.size()), buffers_.data());
             alGenSources(1, &source_);

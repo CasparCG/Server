@@ -42,6 +42,7 @@ using namespace boost::container;
 
 struct audio_item
 {
+    const void*          tag = nullptr;
     audio_transform      transform;
     array<const int32_t> samples;
 };
@@ -50,11 +51,13 @@ using audio_buffer_ps = std::vector<double>;
 
 struct audio_mixer::impl
 {
-    monitor::state                      state_;
-    std::stack<core::audio_transform>   transform_stack_;
-    std::vector<audio_item>             items_;
-    std::atomic<float>                  master_volume_{1.0f};
-    spl::shared_ptr<diagnostics::graph> graph_;
+    monitor::state                              state_;
+    std::stack<core::audio_transform>           transform_stack_;
+    std::vector<audio_item>                     items_;
+    std::map<const void*, std::vector<int32_t>> audio_streams_;
+    video_format_desc                           format_desc_;
+    std::atomic<float>                          master_volume_{1.0f};
+    spl::shared_ptr<diagnostics::graph>         graph_;
 
     impl(const impl&) = delete;
     impl& operator=(const impl&) = delete;
@@ -77,11 +80,7 @@ struct audio_mixer::impl
         if (transform_stack_.top().volume < 0.002 || !frame.audio_data())
             return;
 
-        audio_item item;
-        item.transform = transform_stack_.top();
-        item.samples   = frame.audio_data();
-
-        items_.push_back(std::move(item));
+        items_.push_back(std::move(audio_item{frame.stream_tag(), transform_stack_.top(), frame.audio_data()}));
     }
 
     void pop() { transform_stack_.pop(); }
@@ -92,24 +91,67 @@ struct audio_mixer::impl
 
     array<const int32_t> mix(const video_format_desc& format_desc, int nb_samples)
     {
+        if (format_desc_ != format_desc) {
+            audio_streams_.clear();
+            format_desc_ = format_desc;
+        }
+
         auto channels = format_desc.audio_channels;
         auto items    = std::move(items_);
-        auto result   = std::vector<int32_t>(nb_samples * channels, 0);
+        auto result   = std::vector<int32_t>(size_t(nb_samples) * channels, 0);
 
-        auto mixed = std::vector<double>(nb_samples * channels, 0.0f);
+        auto mixed = std::vector<double>(size_t(nb_samples) * channels, 0.0f);
 
+        std::map<const void*, std::vector<int32_t>> next_audio_streams;
+
+        //int i = 0;
         for (auto& item : items) {
-            auto ptr  = item.samples.data();
-            auto size = result.size();
-            for (auto n = 0; n < size; ++n) {
-                if (n < item.samples.size()) {
-                    mixed[n] = static_cast<double>(ptr[n]) * item.transform.volume + mixed[n];
+            auto ptr       = item.samples.data();
+            auto item_size = item.samples.size();
+            auto dst_size  = result.size();
+
+            size_t last_size = 0;
+            const int32_t *last_ptr = nullptr;
+            bool fix_1001 = (1001 == format_desc.framerate.denominator());
+            if (fix_1001) {
+                auto audio_stream = audio_streams_.find(item.tag);
+                if (audio_stream != audio_streams_.end()) {
+                    last_size = audio_stream->second.size();
+                    last_ptr = audio_stream->second.data();
+                } else if (nullptr != item.tag) {
+                    // Insert a sample of silence at startup
+                    // Covers the startup case where eg dst_size is 801 and item_size is 800
+                    // The sample of silence will be output before any valid audio data from the source
+                    last_size = channels;
+                    std::vector<int32_t> buf(last_size);
+                    std::memset(buf.data(), 0, last_size);
+                    last_ptr = buf.data();
+                }
+            }
+
+            for (auto n = 0; n < dst_size; ++n) {
+                if (last_ptr && n < last_size) {
+                    mixed[n] = static_cast<double>(last_ptr[n]) * item.transform.volume + mixed[n];
+                } else if (n < last_size + item_size) {
+                    mixed[n] = static_cast<double>(ptr[n - last_size]) * item.transform.volume + mixed[n];
                 } else {
-                    auto offset = (item.samples.size()) - (channels - (n % channels));
+                    auto offset = int(item_size) - (channels - (n % channels));
                     mixed[n]    = static_cast<double>(ptr[offset]) * item.transform.volume + mixed[n];
                 }
             }
+
+            if (fix_1001 && item.tag) {
+                if (item_size + last_size > dst_size) {
+                    auto                 buf_size = item_size + last_size - dst_size;
+                    std::vector<int32_t> buf(buf_size);
+                    std::memcpy(buf.data(), item.samples.data() + dst_size - last_size, buf_size * sizeof(int32_t));
+                    next_audio_streams[item.tag] = std::move(buf);
+                } else
+                    next_audio_streams[item.tag] = std::vector<int32_t>();
+            }
         }
+
+        audio_streams_ = std::move(next_audio_streams);
 
         auto master_volume = master_volume_.load();
         for (auto n = 0; n < mixed.size(); ++n) {

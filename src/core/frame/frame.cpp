@@ -84,6 +84,7 @@ array<std::uint8_t>&       mutable_frame::image_data(std::size_t index) { return
 array<std::int32_t>&       mutable_frame::audio_data() { return impl_->audio_data_; }
 std::size_t                mutable_frame::width() const { return impl_->desc_.planes.at(0).width; }
 std::size_t                mutable_frame::height() const { return impl_->desc_.planes.at(0).height; }
+const void*                mutable_frame::stream_tag() const { return impl_->tag_; }
 const frame_geometry&      mutable_frame::geometry() const { return impl_->geometry_; }
 frame_geometry&            mutable_frame::geometry() { return impl_->geometry_; }
 
@@ -92,13 +93,16 @@ struct const_frame::impl
     std::vector<array<const std::uint8_t>> image_data_;
     array<const std::int32_t>              audio_data_;
     core::pixel_format_desc                desc_     = pixel_format::invalid;
+    const void*                            tag_;
     frame_geometry                         geometry_ = frame_geometry::get_default();
     boost::any                             opaque_;
 
-    impl(std::vector<array<const std::uint8_t>> image_data,
+    impl(const void*                            tag,
+         std::vector<array<const std::uint8_t>> image_data,
          array<const std::int32_t>              audio_data,
          const core::pixel_format_desc&         desc)
-        : image_data_(std::move(image_data))
+        : tag_(tag)
+        , image_data_(std::move(image_data))
         , audio_data_(std::move(audio_data))
         , desc_(desc)
     {
@@ -107,10 +111,12 @@ struct const_frame::impl
         }
     }
 
-    impl(std::vector<array<std::uint8_t>>&& image_data,
+    impl(const void*                        tag,
+         std::vector<array<std::uint8_t>>&& image_data,
          array<const std::int32_t>          audio_data,
          const core::pixel_format_desc&     desc)
-        : image_data_(std::make_move_iterator(image_data.begin()), std::make_move_iterator(image_data.end()))
+        : tag_(tag)
+        , image_data_(std::make_move_iterator(image_data.begin()), std::make_move_iterator(image_data.end()))
         , audio_data_(std::move(audio_data))
         , desc_(desc)
     {
@@ -120,7 +126,8 @@ struct const_frame::impl
     }
 
     impl(mutable_frame&& other)
-        : image_data_(std::make_move_iterator(other.impl_->image_data_.begin()),
+        : tag_(other.stream_tag())
+        , image_data_(std::make_move_iterator(other.impl_->image_data_.begin()),
                       std::make_move_iterator(other.impl_->image_data_.end()))
         , audio_data_(std::move(other.impl_->audio_data_))
         , desc_(std::move(other.impl_->desc_))
@@ -147,7 +154,7 @@ const_frame::const_frame() {}
 const_frame::const_frame(std::vector<array<const std::uint8_t>> image_data,
                          array<const std::int32_t>              audio_data,
                          const core::pixel_format_desc&         desc)
-    : impl_(new impl(std::move(image_data), std::move(audio_data), desc))
+    : impl_(new impl(nullptr, std::move(image_data), std::move(audio_data), desc))
 {
 }
 const_frame::const_frame(mutable_frame&& other)
@@ -174,6 +181,12 @@ const array<const std::int32_t>& const_frame::audio_data() const { return impl_-
 std::size_t                      const_frame::width() const { return impl_->width(); }
 std::size_t                      const_frame::height() const { return impl_->height(); }
 std::size_t                      const_frame::size() const { return impl_->size(); }
+const void*                      const_frame::stream_tag() const { return impl_->tag_; }
+const_frame                      const_frame::with_tag(const void* new_tag) const {
+    const_frame copy(*this);
+    copy.impl_->tag_ = new_tag;
+    return copy;
+}
 const frame_geometry&            const_frame::geometry() const { return impl_->geometry_; }
 const boost::any&                const_frame::opaque() const { return impl_->opaque_; }
 const_frame::operator bool() const { return impl_ != nullptr && impl_->desc_.format != core::pixel_format::invalid; }

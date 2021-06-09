@@ -23,8 +23,12 @@
 #include <common/diagnostics/graph.h>
 #include <common/param.h>
 #include <common/timer.h>
+#include <stack>
 
+#include <core/frame/frame.h>
 #include <core/frame/draw_frame.h>
+#include <core/frame/frame_visitor.h>
+#include <core/frame/frame_transform.h>
 #include <core/monitor/monitor.h>
 #include <core/producer/frame_producer.h>
 #include <core/video_channel.h>
@@ -36,6 +40,60 @@
 #include <tbb/concurrent_queue.h>
 
 namespace caspar { namespace core {
+
+class fix_stream_tag : public frame_visitor
+{
+    const void* stream_tag_;
+    std::stack<std::pair<frame_transform, std::vector<draw_frame>>> frames_stack_;
+    boost::optional<const_frame>                                    upd_frame_;
+    
+    fix_stream_tag(const fix_stream_tag&);
+    fix_stream_tag& operator=(const fix_stream_tag&);
+
+  public:
+    fix_stream_tag(void* stream_tag)
+        : stream_tag_(stream_tag)
+    {
+        frames_stack_ = std::stack<std::pair<frame_transform, std::vector<draw_frame>>>();
+        frames_stack_.emplace(frame_transform{}, std::vector<draw_frame>());
+    }
+
+    void push(const frame_transform& transform) {
+        frames_stack_.emplace(transform, std::vector<core::draw_frame>());
+    }
+
+    void visit(const const_frame& frame) {
+        upd_frame_ = frame.with_tag(stream_tag_);
+    }
+
+    void pop() {
+        auto popped = frames_stack_.top();
+        frames_stack_.pop();
+
+        if (upd_frame_ != boost::none) {
+            auto new_frame        = draw_frame(std::move(*upd_frame_));
+            upd_frame_            = boost::none;
+            new_frame.transform() = popped.first;
+            frames_stack_.top().second.push_back(std::move(new_frame));
+        } else {
+            auto new_frame        = draw_frame(std::move(popped.second));
+            new_frame.transform() = popped.first;
+            frames_stack_.top().second.push_back(new_frame);
+        }
+    }
+
+    draw_frame operator()(draw_frame frame) {
+        frame.accept(*this);
+
+        auto popped = frames_stack_.top();
+        frames_stack_.pop();
+        draw_frame result = std::move(popped.second);
+
+        frames_stack_ = std::stack<std::pair<frame_transform, std::vector<draw_frame>>>();
+        frames_stack_.emplace(frame_transform{}, std::vector<draw_frame>());
+        return result;
+    }
+};
 
 class route_producer
     : public frame_producer
@@ -54,6 +112,7 @@ class route_producer
     core::draw_frame frame_;
     int              source_channel_;
     int              source_layer_;
+    fix_stream_tag   tag_fix_;
 
     int get_source_channel() const { return source_channel_; }
     int get_source_layer() const { return source_layer_; }
@@ -73,12 +132,15 @@ class route_producer
         : route_(route)
         , source_channel_(source_channel)
         , source_layer_(source_layer)
+        , tag_fix_(this)
         , connection_(route_->signal.connect([this](const core::draw_frame& frame) {
             auto frame2 = frame;
             if (!frame2) {
                 // We got a frame, so ensure it is a real frame (otherwise the layer gets confused)
                 frame2 = core::draw_frame::push(frame2);
             }
+            // Update the tag in the frame to allow the audio mixer to distiguish between the source frame and the routed frame
+            frame2 = tag_fix_(frame2);
             if (!buffer_.try_push(frame2)) {
                 graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
             }
