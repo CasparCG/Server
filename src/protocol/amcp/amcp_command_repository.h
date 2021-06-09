@@ -43,13 +43,20 @@ class amcp_command_repository
 
     void init(const std::vector<spl::shared_ptr<core::video_channel>>& channels);
 
-    AMCPCommand::ptr_type
-                          create_command(const std::wstring& s, IO::ClientInfoPtr client, std::list<std::wstring>& tokens) const;
-    AMCPCommand::ptr_type create_channel_command(const std::wstring&      s,
+    AMCPCommand::ptr_type create_command(const std::wstring&      name,
+                                         const std::wstring&      request_id,
+                                         IO::ClientInfoPtr        client,
+                                         std::list<std::wstring>& tokens) const;
+    AMCPCommand::ptr_type create_channel_command(const std::wstring&      name,
+                                                 const std::wstring&      request_id,
                                                  IO::ClientInfoPtr        client,
                                                  unsigned int             channel_index,
                                                  int                      layer_index,
                                                  std::list<std::wstring>& tokens) const;
+
+    std::shared_ptr<AMCPCommand>
+                                        parse_command(IO::ClientInfoPtr client, std::list<std::wstring> tokens, const std::wstring& request_id) const;
+    bool                                check_channel_lock(IO::ClientInfoPtr client, int channel_index) const;
 
     const std::vector<channel_context>& channels() const;
 

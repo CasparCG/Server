@@ -25,6 +25,7 @@ set(SOURCES
 		util/lock_container.cpp
 		util/strategy_adapters.cpp
 		util/http_request.cpp
+		util/tokenize.cpp
 
 		StdAfx.cpp
 )
@@ -62,6 +63,7 @@ set(HEADERS
 		util/protocol_strategy.h
 		util/strategy_adapters.h
 		util/http_request.h
+		util/tokenize.h
 
 		StdAfx.h
 )

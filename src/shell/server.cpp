@@ -50,9 +50,11 @@
 #include <protocol/osc/client.h>
 #include <protocol/util/AsyncEventServer.h>
 #include <protocol/util/strategy_adapters.h>
+#include <protocol/util/tokenize.h>
 
 #include <boost/algorithm/string.hpp>
 #include <boost/asio.hpp>
+#include <boost/format.hpp>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/xml_parser.hpp>
 
@@ -133,8 +135,14 @@ struct server::impl
 
     void start()
     {
-        setup_channels(env::properties());
+        auto xml_channels = setup_channels(env::properties());
         CASPAR_LOG(info) << L"Initialized channels.";
+
+        setup_amcp_command_repo();
+        CASPAR_LOG(info) << L"Initialized command repository.";
+
+        setup_channel_producers(xml_channels);
+        CASPAR_LOG(info) << L"Initialized startup producers.";
 
         setup_controllers(env::properties());
         CASPAR_LOG(info) << L"Initialized controllers.";
@@ -162,7 +170,7 @@ struct server::impl
         core::diagnostics::osd::shutdown();
     }
 
-    void setup_channels(const boost::property_tree::wptree& pt)
+    std::vector<boost::property_tree::wptree> setup_channels(const boost::property_tree::wptree& pt)
     {
         using boost::property_tree::wptree;
 
@@ -214,6 +222,44 @@ struct server::impl
                 }
             }
         }
+
+        return xml_channels;
+    }
+
+    void setup_channel_producers(const std::vector<boost::property_tree::wptree>& xml_channels)
+    {
+        auto console_client = spl::make_shared<IO::ConsoleClientInfo>();
+
+        for (auto& channel : channels_) {
+            core::diagnostics::scoped_call_context save;
+            core::diagnostics::call_context::for_thread().video_channel = channel->index();
+
+            auto xml_channel = xml_channels.at(channel->index() - 1);
+
+            if (xml_channel.get_child_optional(L"producers")) {
+                for (auto& xml_producer : xml_channel | witerate_children(L"producers") | welement_context_iteration) {
+                    ptree_verify_element_name(xml_producer, L"producer");
+
+                    const std::wstring command = xml_producer.second.get_value(L"");
+                    const auto         attrs   = xml_producer.second.get_child(L"<xmlattr>");
+                    const int          id      = attrs.get(L"id", -1);
+
+                    try {
+                        std::list<std::wstring> tokens{L"PLAY",
+                                                       (boost::wformat(L"%i-%i") % channel->index() % id).str()};
+                        IO::tokenize(command, tokens);
+                        auto cmd = amcp_command_repo_->parse_command(console_client, tokens, L"");
+                        if (cmd) {
+                            cmd->SendReply(cmd->Execute());
+                        }
+                    } catch (const user_error&) {
+                        CASPAR_LOG(error) << "Failed to parse command: " << command;
+                    } catch (...) {
+                        CASPAR_LOG_CURRENT_EXCEPTION();
+                    }
+                }
+            }
+        }
     }
 
     void setup_osc(const boost::property_tree::wptree& pt)
@@ -254,10 +300,14 @@ struct server::impl
                 });
     }
 
-    void setup_controllers(const boost::property_tree::wptree& pt)
+    void setup_amcp_command_repo()
     {
         amcp_command_repo_->init(channels_);
         amcp::register_commands(*amcp_command_repo_);
+    }
+
+    void setup_controllers(const boost::property_tree::wptree& pt)
+    {
 
         using boost::property_tree::wptree;
         for (auto& xml_controller : pt | witerate_children(L"configuration.controllers") | welement_context_iteration) {
