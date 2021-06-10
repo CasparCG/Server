@@ -45,6 +45,7 @@
 #include <core/frame/frame_transform.h>
 #include <core/mixer/mixer.h>
 #include <core/producer/cg_proxy.h>
+#include <core/producer/color/color_producer.h>
 #include <core/producer/frame_producer.h>
 #include <core/producer/stage.h>
 #include <core/producer/transition/sting_producer.h>
@@ -223,31 +224,39 @@ std::wstring loadbg_command(command_context& ctx)
     core::diagnostics::call_context::for_thread().video_channel = ctx.channel_index + 1;
     core::diagnostics::call_context::for_thread().layer         = ctx.layer_index();
 
-    auto channel = ctx.channel.channel;
-    auto pFP     = ctx.producer_registry->create_producer(get_producer_dependencies(channel, ctx), ctx.parameters);
-
-    if (pFP == frame_producer::empty())
-        CASPAR_THROW_EXCEPTION(file_not_found() << msg_info(ctx.parameters.size() > 0 ? ctx.parameters[0] : L""));
-
+    auto channel   = ctx.channel.channel;
     bool auto_play = contains_param(L"AUTO", ctx.parameters);
 
-    spl::shared_ptr<frame_producer> transition_producer = frame_producer::empty();
-    transition_info                 transitionInfo;
-    sting_info                      stingInfo;
+    try {
+        auto pFP = ctx.producer_registry->create_producer(get_producer_dependencies(channel, ctx), ctx.parameters);
 
-    if (try_match_sting(ctx.parameters, stingInfo)) {
-        transition_producer = create_sting_producer(get_producer_dependencies(channel, ctx), pFP, stingInfo);
-    } else {
-        std::wstring message;
-        for (size_t n = 0; n < ctx.parameters.size(); ++n)
-            message += boost::to_upper_copy(ctx.parameters[n]) + L" ";
+        if (pFP == frame_producer::empty())
+            CASPAR_THROW_EXCEPTION(file_not_found() << msg_info(ctx.parameters.size() > 0 ? ctx.parameters[0] : L""));
 
-        // Always fallback to transition
-        try_match_transition(message, transitionInfo);
-        transition_producer = create_transition_producer(pFP, transitionInfo);
+        spl::shared_ptr<frame_producer> transition_producer = frame_producer::empty();
+        transition_info                 transitionInfo;
+        sting_info                      stingInfo;
+
+        if (try_match_sting(ctx.parameters, stingInfo)) {
+            transition_producer = create_sting_producer(get_producer_dependencies(channel, ctx), pFP, stingInfo);
+        } else {
+            std::wstring message;
+            for (size_t n = 0; n < ctx.parameters.size(); ++n)
+                message += boost::to_upper_copy(ctx.parameters[n]) + L" ";
+
+            // Always fallback to transition
+            try_match_transition(message, transitionInfo);
+            transition_producer = create_transition_producer(pFP, transitionInfo);
+        }
+
+        channel->stage().load(ctx.layer_index(), transition_producer, false, auto_play); // TODO: LOOP
+    } catch (file_not_found&) {
+        if (contains_param(L"CLEAR_ON_404", ctx.parameters)) {
+            channel->stage().load(
+                ctx.layer_index(), core::create_color_producer(channel->frame_factory(), 0), false, auto_play);
+        }
+        throw;
     }
-
-    channel->stage().load(ctx.layer_index(), transition_producer, false, auto_play); // TODO: LOOP
 
     return L"202 LOADBG OK\r\n";
 }
@@ -257,19 +266,40 @@ std::wstring load_command(command_context& ctx)
     core::diagnostics::scoped_call_context save;
     core::diagnostics::call_context::for_thread().video_channel = ctx.channel_index + 1;
     core::diagnostics::call_context::for_thread().layer         = ctx.layer_index();
-    auto pFP =
-        ctx.producer_registry->create_producer(get_producer_dependencies(ctx.channel.channel, ctx), ctx.parameters);
-    auto pFP2 = create_transition_producer(pFP, transition_info{});
 
-    ctx.channel.channel->stage().load(ctx.layer_index(), pFP2, true);
+    if (ctx.parameters.empty()) {
+        // Must be a promoting load
+        ctx.channel.channel->stage().preview(ctx.layer_index());
+    } else {
+        try {
+            auto pFP  = ctx.producer_registry->create_producer(get_producer_dependencies(ctx.channel.channel, ctx),
+                                                              ctx.parameters);
+            auto pFP2 = create_transition_producer(pFP, transition_info{});
+
+            ctx.channel.channel->stage().load(ctx.layer_index(), pFP2, true);
+        } catch (file_not_found&) {
+            if (contains_param(L"CLEAR_ON_404", ctx.parameters)) {
+                ctx.channel.channel->stage().load(
+                    ctx.layer_index(), core::create_color_producer(ctx.channel.channel->frame_factory(), 0), true);
+            }
+            throw;
+        }
+    }
 
     return L"202 LOAD OK\r\n";
 }
 
 std::wstring play_command(command_context& ctx)
 {
-    if (!ctx.parameters.empty())
-        loadbg_command(ctx);
+    try {
+        if (!ctx.parameters.empty())
+            loadbg_command(ctx);
+    } catch (file_not_found&) {
+        if (contains_param(L"CLEAR_ON_404", ctx.parameters)) {
+            ctx.channel.channel->stage().play(ctx.layer_index());
+        }
+        throw;
+    }
 
     ctx.channel.channel->stage().play(ctx.layer_index());
 
@@ -736,13 +766,14 @@ std::wstring mixer_keyer_command(command_context& ctx)
 
     transforms_applier transforms(ctx);
     bool               value = std::stoi(ctx.parameters.at(0));
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.is_key = value;
-                                                return transform;
-                                            },
-                                            0,
-                                            tweener(L"linear")));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.is_key = value;
+            return transform;
+        },
+        0,
+        tweener(L"linear")));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -755,13 +786,14 @@ std::wstring mixer_invert_command(command_context& ctx)
 
     transforms_applier transforms(ctx);
     bool               value = std::stoi(ctx.parameters.at(0));
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.invert = value;
-                                                return transform;
-                                            },
-                                            0,
-                                            tweener(L"linear")));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.invert = value;
+            return transform;
+        },
+        0,
+        tweener(L"linear")));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -826,13 +858,14 @@ std::wstring mixer_chroma_command(command_context& ctx)
         }
     }
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.chroma = chroma;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.chroma = chroma;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -845,13 +878,14 @@ std::wstring mixer_blend_command(command_context& ctx)
 
     transforms_applier transforms(ctx);
     auto               value = get_blend_mode(ctx.parameters.at(0));
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.blend_mode = value;
-                                                return transform;
-                                            },
-                                            0,
-                                            tweener(L"linear")));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.blend_mode = value;
+            return transform;
+        },
+        0,
+        tweener(L"linear")));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -868,13 +902,14 @@ std::wstring single_double_animatable_mixer_command(command_context& ctx, const 
     int                duration = ctx.parameters.size() > 1 ? std::stoi(ctx.parameters[1]) : 0;
     std::wstring       tween    = ctx.parameters.size() > 2 ? ctx.parameters[2] : L"linear";
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                setter(transform, value);
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            setter(transform, value);
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -931,13 +966,14 @@ std::wstring mixer_levels_command(command_context& ctx)
     int          duration = ctx.parameters.size() > 5 ? std::stoi(ctx.parameters[5]) : 0;
     std::wstring tween    = ctx.parameters.size() > 6 ? ctx.parameters[6] : L"linear";
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.levels = value;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.levels = value;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -961,16 +997,17 @@ std::wstring mixer_fill_command(command_context& ctx)
     double             x_s      = std::stod(ctx.parameters.at(2));
     double             y_s      = std::stod(ctx.parameters.at(3));
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) mutable -> frame_transform {
-                                                transform.image_transform.fill_translation[0] = x;
-                                                transform.image_transform.fill_translation[1] = y;
-                                                transform.image_transform.fill_scale[0]       = x_s;
-                                                transform.image_transform.fill_scale[1]       = y_s;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) mutable -> frame_transform {
+            transform.image_transform.fill_translation[0] = x;
+            transform.image_transform.fill_translation[1] = y;
+            transform.image_transform.fill_scale[0]       = x_s;
+            transform.image_transform.fill_scale[1]       = y_s;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -995,16 +1032,17 @@ std::wstring mixer_clip_command(command_context& ctx)
     double             x_s      = std::stod(ctx.parameters.at(2));
     double             y_s      = std::stod(ctx.parameters.at(3));
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.clip_translation[0] = x;
-                                                transform.image_transform.clip_translation[1] = y;
-                                                transform.image_transform.clip_scale[0]       = x_s;
-                                                transform.image_transform.clip_scale[1]       = y_s;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.clip_translation[0] = x;
+            transform.image_transform.clip_translation[1] = y;
+            transform.image_transform.clip_scale[0]       = x_s;
+            transform.image_transform.clip_scale[1]       = y_s;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -1024,14 +1062,15 @@ std::wstring mixer_anchor_command(command_context& ctx)
     double             x        = std::stod(ctx.parameters.at(0));
     double             y        = std::stod(ctx.parameters.at(1));
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) mutable -> frame_transform {
-                                                transform.image_transform.anchor[0] = x;
-                                                transform.image_transform.anchor[1] = y;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) mutable -> frame_transform {
+            transform.image_transform.anchor[0] = x;
+            transform.image_transform.anchor[1] = y;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -1053,16 +1092,17 @@ std::wstring mixer_crop_command(command_context& ctx)
     double             lr_x     = std::stod(ctx.parameters.at(2));
     double             lr_y     = std::stod(ctx.parameters.at(3));
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.crop.ul[0] = ul_x;
-                                                transform.image_transform.crop.ul[1] = ul_y;
-                                                transform.image_transform.crop.lr[0] = lr_x;
-                                                transform.image_transform.crop.lr[1] = lr_y;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.crop.ul[0] = ul_x;
+            transform.image_transform.crop.ul[1] = ul_y;
+            transform.image_transform.crop.lr[0] = lr_x;
+            transform.image_transform.crop.lr[1] = lr_y;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -1100,20 +1140,21 @@ std::wstring mixer_perspective_command(command_context& ctx)
     double             ll_x     = std::stod(ctx.parameters.at(6));
     double             ll_y     = std::stod(ctx.parameters.at(7));
 
-    transforms.add(stage::transform_tuple_t(ctx.layer_index(),
-                                            [=](frame_transform transform) -> frame_transform {
-                                                transform.image_transform.perspective.ul[0] = ul_x;
-                                                transform.image_transform.perspective.ul[1] = ul_y;
-                                                transform.image_transform.perspective.ur[0] = ur_x;
-                                                transform.image_transform.perspective.ur[1] = ur_y;
-                                                transform.image_transform.perspective.lr[0] = lr_x;
-                                                transform.image_transform.perspective.lr[1] = lr_y;
-                                                transform.image_transform.perspective.ll[0] = ll_x;
-                                                transform.image_transform.perspective.ll[1] = ll_y;
-                                                return transform;
-                                            },
-                                            duration,
-                                            tween));
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.perspective.ul[0] = ul_x;
+            transform.image_transform.perspective.ul[1] = ul_y;
+            transform.image_transform.perspective.ur[0] = ur_x;
+            transform.image_transform.perspective.ur[1] = ur_y;
+            transform.image_transform.perspective.lr[0] = lr_x;
+            transform.image_transform.perspective.lr[1] = lr_y;
+            transform.image_transform.perspective.ll[0] = ll_x;
+            transform.image_transform.perspective.ll[1] = ll_y;
+            return transform;
+        },
+        duration,
+        tween));
     transforms.apply();
 
     return L"202 MIXER OK\r\n";
@@ -1150,20 +1191,21 @@ std::wstring mixer_grid_command(command_context& ctx)
     for (int x = 0; x < n; ++x) {
         for (int y = 0; y < n; ++y) {
             int index = x + y * n + 1;
-            transforms.add(stage::transform_tuple_t(index,
-                                                    [=](frame_transform transform) -> frame_transform {
-                                                        transform.image_transform.fill_translation[0] = x * delta;
-                                                        transform.image_transform.fill_translation[1] = y * delta;
-                                                        transform.image_transform.fill_scale[0]       = delta;
-                                                        transform.image_transform.fill_scale[1]       = delta;
-                                                        transform.image_transform.clip_translation[0] = x * delta;
-                                                        transform.image_transform.clip_translation[1] = y * delta;
-                                                        transform.image_transform.clip_scale[0]       = delta;
-                                                        transform.image_transform.clip_scale[1]       = delta;
-                                                        return transform;
-                                                    },
-                                                    duration,
-                                                    tween));
+            transforms.add(stage::transform_tuple_t(
+                index,
+                [=](frame_transform transform) -> frame_transform {
+                    transform.image_transform.fill_translation[0] = x * delta;
+                    transform.image_transform.fill_translation[1] = y * delta;
+                    transform.image_transform.fill_scale[0]       = delta;
+                    transform.image_transform.fill_scale[1]       = delta;
+                    transform.image_transform.clip_translation[0] = x * delta;
+                    transform.image_transform.clip_translation[1] = y * delta;
+                    transform.image_transform.clip_scale[0]       = delta;
+                    transform.image_transform.clip_scale[1]       = delta;
+                    return transform;
+                },
+                duration,
+                tween));
         }
     }
     transforms.apply();
@@ -1483,7 +1525,7 @@ std::wstring gl_gc_command(command_context& ctx)
 void register_commands(amcp_command_repository& repo)
 {
     repo.register_channel_command(L"Basic Commands", L"LOADBG", loadbg_command, 1);
-    repo.register_channel_command(L"Basic Commands", L"LOAD", load_command, 1);
+    repo.register_channel_command(L"Basic Commands", L"LOAD", load_command, 0);
     repo.register_channel_command(L"Basic Commands", L"PLAY", play_command, 0);
     repo.register_channel_command(L"Basic Commands", L"PAUSE", pause_command, 0);
     repo.register_channel_command(L"Basic Commands", L"RESUME", resume_command, 0);

@@ -45,6 +45,7 @@ class layer final
 
     void load(spl::shared_ptr<frame_producer> producer, bool preview, bool auto_play = false);
     void play();
+    void preview();
     void pause();
     void resume();
     void stop();

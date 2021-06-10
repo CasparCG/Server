@@ -45,17 +45,23 @@ struct layer::impl
 
     void resume() { paused_ = false; }
 
-    void load(spl::shared_ptr<frame_producer> producer, bool preview, bool auto_play)
+    void load(spl::shared_ptr<frame_producer> producer, bool preview_producer, bool auto_play)
     {
         background_ = std::move(producer);
         auto_play_  = auto_play;
 
         if (auto_play_ && foreground_ == frame_producer::empty()) {
             play();
-        } else if (preview) {
-            foreground_ = std::move(background_);
-            background_ = frame_producer::empty();
-            paused_     = true;
+        } else if (preview_producer) {
+            preview(true);
+        }
+    }
+
+    void preview(bool force)
+    {
+        if (force || background_ != frame_producer::empty()) {
+            play();
+            paused_ = true;
         }
     }
 
@@ -160,6 +166,7 @@ void layer::load(spl::shared_ptr<frame_producer> frame_producer, bool preview, b
     return impl_->load(std::move(frame_producer), preview, auto_play);
 }
 void       layer::play() { impl_->play(); }
+void       layer::preview() { impl_->preview(false); }
 void       layer::pause() { impl_->pause(); }
 void       layer::resume() { impl_->resume(); }
 void       layer::stop() { impl_->stop(); }

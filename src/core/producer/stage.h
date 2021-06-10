@@ -71,6 +71,7 @@ class stage final
     std::future<frame_transform> get_current_transform(int index);
     std::future<void>
                               load(int index, const spl::shared_ptr<frame_producer>& producer, bool preview = false, bool auto_play = false);
+    std::future<void>         preview(int index);
     std::future<void>         pause(int index);
     std::future<void>         resume(int index);
     std::future<void>         play(int index);

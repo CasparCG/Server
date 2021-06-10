@@ -230,6 +230,11 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     {
         return executor_.begin_invoke([=] { get_layer(index).load(producer, preview, auto_play); });
     }
+    
+	std::future<void> preview(int index)
+    {
+        return executor_.begin_invoke([=] { get_layer(index).preview(); });
+    }
 
     std::future<void> pause(int index)
     {
@@ -369,6 +374,7 @@ std::future<void> stage::load(int index, const spl::shared_ptr<frame_producer>& 
 {
     return impl_->load(index, producer, preview, auto_play);
 }
+std::future<void> stage::preview(int index) { return impl_->preview(index); }
 std::future<void> stage::pause(int index) { return impl_->pause(index); }
 std::future<void> stage::resume(int index) { return impl_->resume(index); }
 std::future<void> stage::play(int index) { return impl_->play(index); }
