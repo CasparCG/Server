@@ -235,8 +235,23 @@ bool has_invalid_protocol(const std::wstring& filename)
     return false;
 }
 
+bool is_readable(const std::wstring& filename)
+{
+    auto u8filename = u8(filename);
+
+    std::ifstream file(u8filename);
+    if (file) {
+        return true;
+    }
+    return false;
+}
+
 bool is_valid_file(const std::wstring& filename)
 {
+    if (!is_readable(filename)) {
+        return false;
+    }
+
     const auto valid_ext = has_valid_extension(filename);
     if (valid_ext) {
         return true;
