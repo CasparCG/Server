@@ -37,6 +37,8 @@
 
 #include <tbb/concurrent_unordered_map.h>
 
+#include <boost/dll.hpp>
+
 #include <GL/glew.h>
 
 #include <atomic>
@@ -65,8 +67,9 @@ sf::Font& get_default_font()
 {
     static sf::Font DEFAULT_FONT = []() {
         sf::Font font;
-        if (!font.loadFromFile("LiberationMono-Regular.ttf"))
-            CASPAR_THROW_EXCEPTION(file_not_found() << msg_info("LiberationMono-Regular.ttf not found"));
+        auto font_path = boost::dll::program_location().parent_path().parent_path().string() + "/LiberationMono-Regular.ttf";
+        if (!font.loadFromFile(font_path))
+            CASPAR_THROW_EXCEPTION(file_not_found() << msg_info(font_path + " not found"));
         return font;
     }();
 
