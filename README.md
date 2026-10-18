@@ -60,6 +60,34 @@ The most up-to-date documentation is always available at https://casparcg.com/do
 
 Ask questions in the forum: https://casparcgforum.org/
 
+### OSC mixer state
+
+Layer mixer properties are available under
+`/channel/N/stage/layer/L/transform/`: `opacity`, `contrast`, `brightness`,
+`saturation`, `anchor`, `fill_translation`, `fill_scale`, `clip_translation`,
+`clip_scale`, `angle`, and `volume`. Position and scale properties contain two
+float arguments; the other properties contain one float argument.
+
+Transform snapshots travel with their rendered frames through the mixer buffer.
+Channel status publishes the snapshot for the frame returned by the mixer, after
+the output call, never a transform waiting in the mixer queue. Before the first
+rendered frame is returned, no transform status is published. With no consumers,
+mixing is skipped and new mixer settings are not announced.
+
+OSC queues only changed transform properties, and queues the latest applied
+snapshot on the next channel tick when a new endpoint subscribes. Consumer and
+hardware presentation delays are not included. Other OSC telemetry continues at
+its existing cadence. As with all OSC-over-UDP telemetry, queueing does not
+guarantee delivery.
+
+Outgoing bundles carry the current wall-clock time as an OSC/NTP timetag.
+Receivers that schedule bundles should use a synchronized clock.
+
+Messages exceeding the OSC encoder's 65536-byte probe buffer are dropped with a
+warning; other messages continue to be sent. Repeated identical send errors are
+logged once per endpoint until recovery, a different error, or removal of that
+endpoint from the sender's active set.
+
 Development
 -----------
 

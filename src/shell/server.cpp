@@ -324,7 +324,7 @@ struct server::impl
                                                             .count();
                                                     auto client                      = weak_client.lock();
                                                     if (client) {
-                                                        client->send(std::move(state));
+                                                        client->send(channel_id, state);
                                                     }
                                                 });
 

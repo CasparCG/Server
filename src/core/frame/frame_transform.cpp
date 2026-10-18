@@ -152,6 +152,7 @@ bool operator==(const rectangle& lhs, const rectangle& rhs)
     return boost::range::equal(lhs.ul, rhs.ul, eq) && boost::range::equal(lhs.lr, rhs.lr, eq);
 }
 
+/// Compares image properties with numeric tolerance and requires matching geometry-modifier flags.
 bool operator==(const image_transform& lhs, const image_transform& rhs)
 {
     return eq(lhs.opacity, rhs.opacity) && eq(lhs.contrast, rhs.contrast) && eq(lhs.brightness, rhs.brightness) &&
@@ -180,8 +181,8 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                boost::range::equal(lhs.cdl_slope, rhs.cdl_slope, eq) &&
                boost::range::equal(lhs.cdl_offset, rhs.cdl_offset, eq) &&
                boost::range::equal(lhs.cdl_power, rhs.cdl_power, eq) &&
-               eq(lhs.cdl_saturation, rhs.cdl_saturation) ||
-           lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
+               eq(lhs.cdl_saturation, rhs.cdl_saturation) &&
+               lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 
 bool operator!=(const image_transform& lhs, const image_transform& rhs) { return !(lhs == rhs); }

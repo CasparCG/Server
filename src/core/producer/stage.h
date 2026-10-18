@@ -60,6 +60,7 @@ struct stage_frames
     int                     nb_samples;
     std::vector<draw_frame> frames;
     std::vector<draw_frame> frames2;
+    monitor::state          transforms;
 };
 
 /**

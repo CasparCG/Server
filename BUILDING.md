@@ -88,6 +88,19 @@ Before beginning, check the build options section below, to decide if you want t
 
 If all goes to plan, a folder called 'staging' has been created with everything you need to run CasparCG server.
 
+### Regression tests
+
+From the repository root, enable tests in your existing build, then build and
+run the OSC loopback test:
+
+```
+cmake -S src -B build -DBUILD_TESTING=ON
+cmake --build build --target osc_client_test
+ctest --test-dir build -R '^osc_client$' --output-on-failure
+```
+
+The test uses local UDP sockets and does not require a GPU or broadcast hardware.
+
 ## Build options
 
 -DENABLE_HTML=OFF - useful if you lack CEF, and would like to build without that module.

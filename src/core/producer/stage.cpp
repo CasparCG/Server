@@ -43,6 +43,29 @@
 
 namespace caspar { namespace core {
 
+namespace {
+/// Captures current MIXER properties for publication only after their associated frame is rendered.
+monitor::state transform_state(const frame_transform& transform)
+{
+    monitor::state state;
+
+    auto& image = transform.image_transform;
+    state["opacity"]          = image.opacity;
+    state["contrast"]         = image.contrast;
+    state["brightness"]       = image.brightness;
+    state["saturation"]       = image.saturation;
+    state["anchor"]           = std::vector<double>(image.anchor.begin(), image.anchor.end());
+    state["fill_translation"] = std::vector<double>(image.fill_translation.begin(), image.fill_translation.end());
+    state["fill_scale"]       = std::vector<double>(image.fill_scale.begin(), image.fill_scale.end());
+    state["clip_translation"] = std::vector<double>(image.clip_translation.begin(), image.clip_translation.end());
+    state["clip_scale"]       = std::vector<double>(image.clip_scale.begin(), image.clip_scale.end());
+    state["angle"]            = image.angle;
+    state["volume"]           = transform.audio_transform.volume;
+
+    return state;
+}
+} // namespace
+
 struct stage::impl : public std::enable_shared_from_this<impl>
 {
     int                                 channel_index_;
@@ -116,6 +139,7 @@ struct stage::impl : public std::enable_shared_from_this<impl>
     {
     }
 
+    /// Produces channel frames and captures their transforms without marking those settings as applied.
     const stage_frames operator()(uint64_t                                     frame_number,
                                   std::vector<int>&                            fetch_background,
                                   std::function<void(int, const layer_frame&)> routesCb)
@@ -219,7 +243,10 @@ struct stage::impl : public std::enable_shared_from_this<impl>
                 monitor::state state;
                 for (auto& p : layers_) {
                     state["layer"][p.first] = p.second.state();
+
+                    result.transforms["layer"][p.first]["transform"] = transform_state(tweens_[p.first].fetch());
                 }
+
                 state_ = std::move(state);
             } catch (...) {
                 layers_.clear();
