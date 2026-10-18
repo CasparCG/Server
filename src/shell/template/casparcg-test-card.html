@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<!--
+  CasparCG channel test card / identification slide.
+
+  Usage (AMCP):
+    CG 1-99 ADD 1 CASPARCG-TEST-CARD 1 "{}"
+    CG 1-99 ADD 1 CASPARCG-TEST-CARD 1 "{\"channel\":1,\"resolution\":\"1920x1080\",\"frameRate\":\"59.94i\",\"hostname\":\"PLAY3\",\"ip\":\"10.0.0.21\",\"device\":\"DECKLINK 2\",\"version\":\"2.6.0\",\"title\":\"THIS IS ONLY A TEST\",\"company\":\"CASPARCG BROADCASTING CO.\",\"take\":1,\"duration\":\"CONTINUOUS\",\"date\":\"2026-09-21\"}"
+
+  A plain PLAY 1-99 CASPARCG-TEST-CARD will show the card, but only CG ADD
+  with play_on_load (the trailing 1) invokes the play() callback below that
+  starts the audio tone, live clock and title rotation - see
+  src/modules/html/producer/html_cg_proxy.cpp for why.
+
+  Every field in the update() JSON payload is optional and works the same way:
+  channel/resolution/frameRate/hostname/ip/device/version fall back to "-" if
+  not supplied, and title/company/duration/take/date fall back to
+  CasparCG-flavored defaults ("take" to a running count of play() calls,
+  "date" to a live clock) so the card is still useful with a bare
+  CG ADD ... 1 "{}" and no identification data at all. Audio is a
+  GLITS ident per EBU Tech 3304: 1kHz at -18dBFS, continuous on the right
+  channel and interrupted for 250ms every 3 seconds on the left, generated
+  with the Web Audio API - no external files needed for either the picture or
+  the sound.
+
+  One file works at any channel resolution/frame rate - no per-format variants
+  needed. CasparCG creates the CEF view at the channel's actual pixel size and
+  ticks it at the channel's fps (see html_producer.cpp), so vw/vh-based layout
+  here fills whatever resolution it's given, and CSS animations are wall-clock
+  timed rather than frame-count timed.
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>CasparCG Test Card</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100vw;
+    height: 100vh;
+    background: transparent;
+    overflow: hidden;
+    font-family: "Consolas", "Courier New", monospace;
+  }
+
+  #bars {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 70%;
+    display: flex;
+  }
+
+  /* Classic 75% SMPTE-style 7-bar pattern: white, yellow, cyan, green, magenta, red, blue */
+  #bars .bar { flex: 1 1 0; height: 100%; }
+  #bars .bar:nth-child(1) { background: #bfbfbf; }
+  #bars .bar:nth-child(2) { background: #bfbf00; }
+  #bars .bar:nth-child(3) { background: #00bfbf; }
+  #bars .bar:nth-child(4) { background: #00bf00; }
+  #bars .bar:nth-child(5) { background: #bf00bf; }
+  #bars .bar:nth-child(6) { background: #bf0000; }
+  #bars .bar:nth-child(7) { background: #0000bf; }
+
+  /* Alpha ramp: left edge fully transparent -> right edge fully opaque black,
+     so a correctly configured mixer/keyer shows a smooth gradient, not banding. */
+  #alpha-ramp {
+    position: absolute;
+    top: 70%;
+    left: 0;
+    width: 100%;
+    height: 10%;
+    background: linear-gradient(to right, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 100%);
+  }
+
+  /* A moving element to visually confirm smooth motion / detect interlace tearing. */
+  #motion-track {
+    position: absolute;
+    top: 80%;
+    left: 0;
+    width: 100%;
+    height: 10%;
+    background: #202020;
+    overflow: hidden;
+  }
+  #motion-block {
+    position: absolute;
+    top: 10%;
+    left: 0;
+    width: 4%;
+    height: 80%;
+    background: #ffffff;
+    animation: sweep 4s linear infinite;
+  }
+  @keyframes sweep {
+    from { left: -4%; }
+    to   { left: 100%; }
+  }
+
+  /* Edge-of-picture markers, tip pointing at the true frame edge. Sized in vh so
+     they stay proportional at any channel resolution. */
+  .corner {
+    position: absolute;
+    width: 0;
+    height: 0;
+    border: 2vh solid transparent;
+  }
+  #corner-tl { top: 0; left: 0; border-top-color: #fff; border-left-color: #fff; }
+  #corner-tr { top: 0; right: 0; border-top-color: #fff; border-right-color: #fff; }
+  #corner-bl { bottom: 0; left: 0; border-bottom-color: #fff; border-left-color: #fff; }
+  #corner-br { bottom: 0; right: 0; border-bottom-color: #fff; border-right-color: #fff; }
+
+  #logo {
+    position: absolute;
+    top: 30%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: #ffffff;
+    font-size: 6vh;
+    font-weight: bold;
+    letter-spacing: 0.4vh;
+    text-shadow: 0 0 1.2vh rgba(0,0,0,0.8);
+  }
+
+  /* GLITS-style slate line: production/company/take/duration/date, matching the
+     slate fields from the GLITS reference in issue #95. "take" stands in for a
+     tape/reel number - there's no physical reel in a file-based playout chain,
+     but a running play count is the same idea (how many times has this been
+     rolled out today). */
+  #slate {
+    position: absolute;
+    top: 90%;
+    left: 0;
+    width: 100%;
+    height: 5%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2vw;
+    color: #cccccc;
+    font-size: 1.8vh;
+    background: #000;
+  }
+  #slate span.label { color: #777777; }
+
+  #ident {
+    position: absolute;
+    top: 95%;
+    left: 0;
+    width: 100%;
+    height: 5%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1.6vw;
+    color: #ffffff;
+    font-size: 2vh;
+    background: #000;
+  }
+  #ident span.label { color: #999999; }
+</style>
+</head>
+<body>
+  <div id="bars">
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div><div class="bar"></div><div class="bar"></div>
+    <div class="bar"></div>
+  </div>
+
+  <div id="alpha-ramp"></div>
+
+  <div id="motion-track"><div id="motion-block"></div></div>
+
+  <div id="corner-tl" class="corner"></div>
+  <div id="corner-tr" class="corner"></div>
+  <div id="corner-bl" class="corner"></div>
+  <div id="corner-br" class="corner"></div>
+
+  <div id="logo">CasparCG</div>
+
+  <div id="slate">
+    <div><span class="label">TITLE</span> <span id="slate-title">-</span></div>
+    <div><span class="label">CO</span> <span id="slate-company">-</span></div>
+    <div><span class="label">TAKE</span> <span id="slate-take">-</span></div>
+    <div><span class="label">DURATION</span> <span id="slate-duration">-</span></div>
+    <div><span class="label">DATE</span> <span id="slate-date">-</span></div>
+  </div>
+
+  <div id="ident">
+    <div><span class="label">CH</span> <span id="ident-channel">-</span></div>
+    <div><span class="label">RES</span> <span id="ident-resolution">-</span></div>
+    <div><span class="label">FPS</span> <span id="ident-framerate">-</span></div>
+    <div><span class="label">HOST</span> <span id="ident-hostname">-</span></div>
+    <div><span class="label">IP</span> <span id="ident-ip">-</span></div>
+    <div><span class="label">DEV</span> <span id="ident-device">-</span></div>
+    <div><span class="label">VER</span> <span id="ident-version">-</span></div>
+  </div>
+
+<script>
+  // --- Identification overlay -------------------------------------------------
+
+  function setIdent(data) {
+    data = data || {};
+    document.getElementById("ident-channel").textContent    = data.channel      || "-";
+    document.getElementById("ident-resolution").textContent = data.resolution   || "-";
+    document.getElementById("ident-framerate").textContent  = data.frameRate    || "-";
+    document.getElementById("ident-hostname").textContent   = data.hostname     || "-";
+    document.getElementById("ident-ip").textContent         = data.ip          || "-";
+    document.getElementById("ident-device").textContent     = data.device      || "-";
+    document.getElementById("ident-version").textContent    = data.version      || "-";
+  }
+
+  // --- GLITS-style slate line --------------------------------------------------
+  // Populated with CasparCG-flavored defaults so the card is useful even with a
+  // plain PLAY; every field can still be overridden via the normal update()
+  // template data, same as the identification row above. "take" defaults to a
+  // running count of play() calls (the modern, file-based-playout equivalent of
+  // a tape/reel number), "date" defaults to a live clock, and "title" defaults
+  // to a rotating set of one-liners (including a bit of Linux-vs-Windows ribbing,
+  // since CasparCG ships for both) - all three still accept an explicit value
+  // from update() like any other field.
+
+  var titleJokes = [
+    "THIS IS ONLY A TEST",
+    "RUNNING ON LINUX \u2014 NO BLUE SCREENS HERE",
+    "TUX-APPROVED BROADCAST SIGNAL",
+    "STILL FASTER THAN A WINDOWS UPDATE",
+    "0 REBOOTS REQUIRED SINCE LAST TUESDAY",
+    "PENGUINS DO NOT NEED TO DEFRAG",
+    "SORRY WINDOWS, THE PENGUIN GOT HERE FIRST",
+    "NO C:\\ DRIVE, NO PROBLEM"
+  ];
+  var titleIndex = 0;
+  var titleOverride = null;
+  var titleInterval = null;
+
+  var takeCount = 0;
+  var takeOverride = null;
+  var dateOverride = null;
+  var clockInterval = null;
+
+  function renderSlate() {
+    document.getElementById("slate-title").textContent = titleOverride !== null ? titleOverride : titleJokes[titleIndex];
+    document.getElementById("slate-take").textContent  = takeOverride !== null ? takeOverride : takeCount;
+    document.getElementById("slate-date").textContent  = dateOverride !== null ? dateOverride : new Date().toString();
+  }
+
+  function rotateTitle() {
+    titleIndex = (titleIndex + 1) % titleJokes.length;
+    renderSlate();
+  }
+
+  function startTitleRotation() {
+    if (titleInterval) return;
+    titleInterval = setInterval(rotateTitle, 8000);
+  }
+
+  function stopTitleRotation() {
+    clearInterval(titleInterval);
+    titleInterval = null;
+  }
+
+  function setSlate(data) {
+    data = data || {};
+    document.getElementById("slate-company").textContent  = data.company  || "CASPARCG BROADCASTING CO.";
+    document.getElementById("slate-duration").textContent = data.duration || "\u221E (LOOPS UNTIL SOMEONE NOTICES)";
+
+    titleOverride = data.title || null;
+    takeOverride  = (data.take !== undefined && data.take !== null && data.take !== "") ? data.take : null;
+    dateOverride  = data.date || null;
+
+    renderSlate();
+  }
+
+  function bumpTake() {
+    takeCount += 1;
+    renderSlate();
+  }
+
+  function startClock() {
+    if (clockInterval) return;
+    renderSlate();
+    clockInterval = setInterval(renderSlate, 1000);
+  }
+
+  function stopClock() {
+    clearInterval(clockInterval);
+    clockInterval = null;
+  }
+
+  // --- Audio: GLITS ident (EBU Tech 3304) -------------------------------------
+  // Right channel: continuous 1kHz tone. Left channel: same tone, muted for
+  // 250ms every 3 seconds - the gap is what lets the two channels be told
+  // apart by ear. Both at -18dBFS (10^(-18/20) full-scale amplitude).
+
+  var audioCtx = null;
+  var oscillator = null;
+  var leftGain = null;
+  var rightGain = null;
+  var glitsInterval = null;
+
+  function startTone() {
+    if (audioCtx) return;
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var level = Math.pow(10, -18 / 20);
+
+    oscillator = audioCtx.createOscillator();
+    oscillator.type = "sine";
+    oscillator.frequency.value = 1000;
+
+    leftGain = audioCtx.createGain();
+    rightGain = audioCtx.createGain();
+    leftGain.gain.value = level;
+    rightGain.gain.value = level;
+
+    var merger = audioCtx.createChannelMerger(2);
+    oscillator.connect(leftGain).connect(merger, 0, 0);
+    oscillator.connect(rightGain).connect(merger, 0, 1);
+    merger.connect(audioCtx.destination);
+
+    oscillator.start();
+
+    glitsInterval = setInterval(function () {
+      leftGain.gain.value = 0;
+      setTimeout(function () { leftGain.gain.value = level; }, 250);
+    }, 3000);
+  }
+
+  function stopTone() {
+    if (!audioCtx) return;
+
+    clearInterval(glitsInterval);
+    oscillator.stop();
+    audioCtx.close();
+    audioCtx = null;
+    oscillator = null;
+    leftGain = null;
+    rightGain = null;
+    glitsInterval = null;
+  }
+
+  // --- CasparCG template lifecycle --------------------------------------------
+  // See src/modules/html/producer/html_cg_proxy.cpp for the calling convention:
+  // play(), stop(), next(), update(data), remove() are called directly as
+  // global functions by the CG producer.
+
+  function play() {
+    startTone();
+    startClock();
+    startTitleRotation();
+    bumpTake();
+  }
+
+  function stop() {
+    stopTone();
+    stopClock();
+    stopTitleRotation();
+  }
+
+  function next() {
+    // No secondary state to advance to.
+  }
+
+  function update(data) {
+    try {
+      var parsed = JSON.parse(data);
+      setIdent(parsed);
+      setSlate(parsed);
+    } catch (e) {
+      // Ignore malformed/empty data and keep the defaults/placeholders.
+    }
+  }
+
+  function remove() {
+    stopTone();
+    stopClock();
+    stopTitleRotation();
+  }
+
+  // A plain PLAY (no CG ADD/update) should still show something reasonable.
+  setIdent(null);
+  setSlate(null);
+</script>
+</body>
+</html>

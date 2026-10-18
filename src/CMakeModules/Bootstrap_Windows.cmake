@@ -48,6 +48,7 @@ function(casparcg_add_runtime_dependency_from_target TARGET)
 endfunction()
 
 casparcg_add_runtime_dependency("${PROJECT_SOURCE_DIR}/shell/casparcg.config")
+casparcg_add_runtime_dependency_dir("${PROJECT_SOURCE_DIR}/shell/template")
 
 # BOOST
 casparcg_add_external_project(boost)

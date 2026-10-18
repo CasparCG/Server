@@ -206,8 +206,10 @@ else ()
     if ("${CASPARCG_BINARY_NAME}" STREQUAL "casparcg")
         # Looks like a 'default' build, produce a portable folder
 	    install(FILES casparcg.config run.sh DESTINATION ".")
+	    install(DIRECTORY template DESTINATION ".")
     else ()
         # Looks like a build for a system package manager
         install(FILES casparcg.config DESTINATION "share/${CASPARCG_BINARY_NAME}")
+        install(DIRECTORY template DESTINATION "share/${CASPARCG_BINARY_NAME}")
     endif ()
 endif ()
