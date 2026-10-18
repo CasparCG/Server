@@ -101,3 +101,69 @@ If all goes to plan, a folder called 'staging' has been created with everything 
 -DDIAG_FONT_PATH - Specify an alternate path/font to use for the DIAG window. On linux, this will often want to be set to an absolute path of a font
 
 -DCASPARCG_BINARY_NAME=casparcg-server - (Linux only) generate the executable with the specified name. This also reconfigures the install target to be a bit more friendly with system package managers.
+
+## Linux crash diagnostics
+
+For crash investigation, configure with `-DCMAKE_BUILD_TYPE=RelWithDebInfo` and
+retain the exact executable, shared libraries and debug symbols from the failing
+build. This adds debug information; the Linux build still applies its explicit
+optimization flags. `-rdynamic` improves in-process symbol lookup for externally
+visible executable symbols, not static/local functions or next-process decoding.
+
+The SIGSEGV, SIGABRT and SIGILL handlers attempt to write `./backtrace.dump` in
+the process's working directory, then abort using the default SIGABRT disposition.
+The directory must be writable. Capture is best effort: a severe crash may also
+prevent stack unwinding or writing the dump. CEF subprocesses that exit through
+command-line interception do not install these handlers.
+
+After logging is initialized on the next successful startup, CasparCG reports
+the saved **raw addresses** to the configured logging sinks and archives the
+binary dump as `backtrace-<unique-id>.dump` in the working directory. It does not
+delete the evidence or resolve old addresses against the new process's mappings.
+Archival creates a hard link without replacing an existing destination, retrying
+name collisions up to eight times, then removes the original name only after
+the archive exists. The working filesystem must support hard links; failures
+retain the original dump and produce an error diagnostic. Failure to remove the
+original after archiving retains both names and is also reported.
+Unreadable or empty dumps remain in place with an error diagnostic. Retain
+archives as needed and remove old ones according to your operational retention
+policy. If `backtrace.dump` remains after reporting, the next crash uses a
+separate `backtrace-capture-<unique-id>.dump` path announced in the startup log.
+Capture creates its file exclusively and never truncates an existing dump or
+hard-linked archive. Alternate capture files are retained for manual inspection;
+they are not automatically reported on startup. Failure to create a capture file
+leaves existing evidence untouched, but no new Boost dump is written.
+
+ASLR changes executable and library addresses between processes. Neither
+`-rdynamic` nor debug information makes an address-only dump reliably
+symbolizable after restart. Do not disable ASLR as a workaround.
+
+For a reliable symbolized postmortem trace, enable OS core dumps before starting
+the server, subject to your deployment's disk-space and retention policies:
+Replace `casparcg` in the commands below with the executable name configured by
+`CASPARCG_BINARY_NAME` if it differs.
+
+```sh
+ulimit -c unlimited
+./casparcg casparcg.config
+```
+
+For systemd services, configure `LimitCORE=infinity` in the service rather than
+relying on an interactive shell limit. Where systemd-coredump is installed:
+
+```sh
+coredumpctl list casparcg
+coredumpctl debug CRASH_PID
+```
+
+Otherwise, locate the core according to `/proc/sys/kernel/core_pattern`, then:
+
+```sh
+gdb /path/to/exact/casparcg /path/to/core
+```
+
+In GDB, use `thread apply all bt full`. Install or supply matching debug symbols
+for shared libraries as well as CasparCG. A core retains the crashed process's
+mapping information; the raw Boost dump does not. Core dumps can contain media,
+credentials and other process memory: restrict access and review them before
+sharing.

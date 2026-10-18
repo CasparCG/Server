@@ -54,12 +54,28 @@
 #include <boost/stacktrace.hpp>
 
 #include <atomic>
+#include <cerrno>
+#include <cstdint>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
+#include <string>
 #include <thread>
 
 #include <clocale>
 #include <csignal>
+#include <fcntl.h>
+
+#ifdef WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+#include <sys/stat.h>
 
 namespace caspar {
+
+std::string crash_dump_path = "./backtrace.dump";
 
 void setup_global_locale()
 {
@@ -172,8 +188,146 @@ auto run(const std::wstring& config_file_name, std::atomic<bool>& should_wait_fo
 void signal_handler(int signum)
 {
     ::signal(signum, SIG_DFL);
-    boost::stacktrace::safe_dump_to("./backtrace.dump");
-    ::raise(SIGABRT);
+    // Prevent abort() from re-entering this handler.
+    ::signal(SIGABRT, SIG_DFL);
+    // Exclusive creation protects retained dumps, including hard-linked archives.
+    constexpr char failure[] = "Could not create crash dump; existing files were not overwritten.\n";
+#ifdef WIN32
+    const auto fd = ::_open(crash_dump_path.c_str(), _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, _S_IREAD | _S_IWRITE);
+    if (fd != -1) {
+        void* frames[129];
+        const auto frame_count = boost::stacktrace::safe_dump_to(frames, sizeof(frames));
+        const auto written = ::_write(fd, frames, static_cast<unsigned int>(frame_count * sizeof(frames[0])));
+        (void)written;
+        ::_close(fd);
+    } else {
+        const auto written = ::_write(2, failure, sizeof(failure) - 1);
+        (void)written; // A failed stderr write cannot be reported safely from this handler.
+    }
+#else
+    const auto fd = ::open(crash_dump_path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
+    if (fd != -1) {
+        boost::stacktrace::safe_dump_to(fd);
+        ::close(fd);
+    } else {
+        const auto written = ::write(STDERR_FILENO, failure, sizeof(failure) - 1);
+        (void)written; // A failed stderr write cannot be reported safely from this handler.
+    }
+#endif
+    std::abort();
+}
+
+void prepare_crash_dump()
+{
+    boost::system::error_code error;
+    const auto                retained = boost::filesystem::exists("./backtrace.dump", error);
+    if (error == boost::system::errc::no_such_file_or_directory)
+        error.clear();
+    if (retained || error) {
+        crash_dump_path = boost::filesystem::unique_path("./backtrace-capture-%%%%-%%%%-%%%%-%%%%.dump").string();
+        if (error)
+            CASPAR_LOG(error) << L"Could not inspect crash capture path: " << u16(error.message());
+        CASPAR_LOG(warning) << L"Preserving ./backtrace.dump; next crash capture will use " << u16(crash_dump_path);
+    }
+}
+
+void report_previous_crash()
+{
+    const boost::filesystem::path dump("./backtrace.dump");
+    boost::system::error_code     error;
+    const auto                    exists = boost::filesystem::exists(dump, error);
+    if (error == boost::system::errc::no_such_file_or_directory)
+        return;
+    if (error) {
+        CASPAR_LOG(error) << L"Could not inspect previous crash dump: " << u16(error.message());
+        return;
+    }
+    if (!exists)
+        return;
+
+    if (!boost::filesystem::is_regular_file(dump, error) || error) {
+        CASPAR_LOG(error) << L"Previous crash dump is not a regular file or could not be inspected; retained at "
+                             L"./backtrace.dump.";
+        return;
+    }
+
+    boost::stacktrace::stacktrace trace;
+#ifdef WIN32
+    std::ifstream input(dump.string(), std::ios::binary);
+    if (!input) {
+        CASPAR_LOG(error) << L"Could not open previous crash dump; retained at ./backtrace.dump.";
+        return;
+    }
+    trace = boost::stacktrace::stacktrace::from_dump(input);
+    const auto read_failed = input.fail();
+    input.close();
+#else
+    const auto fd = ::open(dump.c_str(), O_RDONLY | O_NONBLOCK);
+    if (fd == -1) {
+        CASPAR_LOG(error) << L"Could not open previous crash dump; retained at ./backtrace.dump.";
+        return;
+    }
+    struct stat info;
+    if (::fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) {
+        ::close(fd);
+        CASPAR_LOG(error) << L"Previous crash dump is not a regular file or could not be inspected; retained at "
+                             L"./backtrace.dump.";
+        return;
+    }
+    std::string contents;
+    char        buffer[4096];
+    bool        read_failed = false;
+    for (;;) {
+        const auto count = ::read(fd, buffer, sizeof(buffer));
+        if (count > 0)
+            contents.append(buffer, static_cast<std::size_t>(count));
+        else if (count == 0)
+            break;
+        else if (errno != EINTR) {
+            read_failed = true;
+            break;
+        }
+    }
+    ::close(fd);
+    if (read_failed) {
+        CASPAR_LOG(error) << L"Could not read previous crash dump; retained at ./backtrace.dump.";
+        return;
+    }
+    std::istringstream input(contents, std::ios::in | std::ios::binary);
+    trace = boost::stacktrace::stacktrace::from_dump(input);
+    read_failed = input.fail();
+#endif
+    if (read_failed || trace.empty()) { // Keep incomplete evidence for manual inspection.
+        CASPAR_LOG(error) << L"Previous crash dump is unreadable or empty; retained at ./backtrace.dump.";
+        return;
+    }
+
+    // ASLR makes this process's symbol mappings unsuitable for the previous process's addresses.
+    std::wostringstream report;
+    report << L"Previous process crash (raw addresses; not symbolized across ASLR restarts):";
+    for (std::size_t n = 0; n < trace.size(); ++n) {
+        report << L"\n" << n << L"# 0x" << std::hex << reinterpret_cast<std::uintptr_t>(trace[n].address()) << std::dec;
+    }
+    report << L"\nUse a core dump and the matching executable/debug symbols for a reliable backtrace. "
+              L"See BUILDING.md, Linux crash diagnostics.";
+    CASPAR_LOG(error) << report.str();
+
+    boost::filesystem::path archive;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        archive = boost::filesystem::unique_path("./backtrace-%%%%-%%%%-%%%%-%%%%.dump");
+        boost::filesystem::create_hard_link(dump, archive, error); // Reserve the name without overwriting an archive.
+        if (error != boost::system::errc::file_exists)
+            break; // Retry only name collisions.
+    }
+    if (error) {
+        CASPAR_LOG(error) << L"Could not archive previous crash dump; retained at ./backtrace.dump: "
+                          << u16(error.message());
+        return;
+    }
+    CASPAR_LOG(error) << L"Previous crash dump preserved at " << archive.wstring();
+    boost::filesystem::remove(dump, error); // Release the original name only after preserving the dump.
+    if (error)
+        CASPAR_LOG(error) << L"Could not remove archived ./backtrace.dump; both paths retained: " << u16(error.message());
 }
 
 void terminate_handler()
@@ -183,7 +337,7 @@ void terminate_handler()
     } catch (...) {
         CASPAR_LOG_CURRENT_EXCEPTION();
     }
-    std::abort();
+    std::abort(); // Capture the stack through the SIGABRT handler.
 }
 
 } // namespace caspar
@@ -198,20 +352,6 @@ int main(int argc, char** argv)
 
     if (intercept_command_line_args(argc, argv))
         return 0;
-
-    ::signal(SIGSEGV, signal_handler);
-    ::signal(SIGABRT, signal_handler);
-    std::set_terminate(caspar::terminate_handler);
-
-    static auto backtrace = "./backtrace.dump";
-    if (boost::filesystem::exists(backtrace)) {
-        std::ifstream     ifs(backtrace);
-        std::stringstream str;
-        str << boost::stacktrace::stacktrace::from_dump(ifs);
-        CASPAR_LOG(error) << u16(str.str());
-        ifs.close();
-        boost::filesystem::remove(backtrace);
-    }
 
     int return_code = 0;
     setup_prerequisites();
@@ -259,6 +399,15 @@ int main(int argc, char** argv)
             std::wcout << L"Logging [" << log::get_log_level() << L"] or higher severity to console" << std::endl
                        << std::endl;
         }
+
+        // Logging is ready; archive old evidence before enabling handlers that could overwrite it.
+        report_previous_crash();
+        prepare_crash_dump();
+
+        ::signal(SIGSEGV, signal_handler);
+        ::signal(SIGABRT, signal_handler);
+        ::signal(SIGILL, signal_handler);
+        std::set_terminate(caspar::terminate_handler);
 
         // Once logging to file, log configuration warnings.
         env::log_configuration_warnings();

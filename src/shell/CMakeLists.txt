@@ -96,6 +96,8 @@ else ()
 		z
 		pthread
 	)
+	# Export executable symbols for in-process traces, not address decoding after restart.
+	target_link_options(casparcg PRIVATE -rdynamic)
 endif ()
 
 add_custom_target(casparcg_copy_dependencies ALL)
