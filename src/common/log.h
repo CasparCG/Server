@@ -74,6 +74,12 @@ bool          set_log_level(const std::wstring& lvl);
 std::wstring& get_log_level();
 void          set_log_column_alignment(bool align_columns);
 
+// Symbolizes the current call stack via boost::stacktrace. On MSVC this drives the dbgeng debug engine,
+// which attaches to the process and opens a handle to every thread; doing this on every logged exception
+// leaks Win32 thread handles under high exception churn (e.g. HLS reconnect storms). It is therefore NOT
+// called on the exception-logging hot path below. Real crashes still get a full backtrace via the
+// signal/terminate handler in main.cpp (safe_dump_to + from_dump). Keep this helper for explicit, manual
+// diagnostic use only.
 inline std::wstring get_stack_trace()
 {
     auto bt = boost::stacktrace::stacktrace();
@@ -85,9 +91,8 @@ inline std::wstring get_stack_trace()
 
 #define CASPAR_LOG_CURRENT_EXCEPTION()                                                                                 \
     try {                                                                                                              \
-        CASPAR_LOG(error) << L"Exception: " << caspar::u16(::caspar::log::current_exception_diagnostic_information())  \
-                          << L"\r\n"                                                                                   \
-                          << caspar::log::get_stack_trace();                                                           \
+        CASPAR_LOG(error) << L"Exception: "                                                                            \
+                          << caspar::u16(::caspar::log::current_exception_diagnostic_information());                   \
     } catch (...) {                                                                                                    \
     }
 

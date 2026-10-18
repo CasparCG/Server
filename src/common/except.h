@@ -45,7 +45,6 @@ using msg_info_t        = boost::error_info<struct tag_msg_info, std::string>;
 using error_info_t      = boost::error_info<struct tag_error_info, std::string>;
 using source_info_t     = boost::error_info<struct tag_source_info, std::string>;
 using file_name_info_t  = boost::error_info<struct tag_file_name_info, std::string>;
-using stacktrace_info_t = boost::error_info<struct tag_stacktrace_info, boost::stacktrace::stacktrace>;
 
 template <typename T>
 arg_name_info_t arg_name_info(const T& str)
@@ -77,8 +76,6 @@ file_name_info_t file_name_info(const T& str)
 {
     return file_name_info_t(u8(str));
 }
-
-inline stacktrace_info_t stacktrace_info() { return stacktrace_info_t(boost::stacktrace::stacktrace()); }
 
 using line_info        = boost::error_info<struct tag_line_info, size_t>;
 using nested_exception = boost::error_info<struct tag_nested_exception_, std::exception_ptr>;
@@ -150,6 +147,6 @@ struct not_supported : virtual user_error
 #define CASPAR_THROW_EXCEPTION(x)                                                                                      \
     ::boost::throw_exception(::boost::enable_error_info(x)                                                             \
                              << ::boost::throw_function(BOOST_CURRENT_FUNCTION) << ::boost::throw_file(__FILE__)       \
-                             << ::boost::throw_line((int)__LINE__) << stacktrace_info())
+                             << ::boost::throw_line((int)__LINE__))
 
 } // namespace caspar
