@@ -35,6 +35,7 @@
 #include <common/assert.h>
 #include <common/diagnostics/graph.h>
 #include <common/env.h>
+#include <common/except.h>
 #include <common/future.h>
 #include <common/os/filesystem.h>
 #include <common/timer.h>
@@ -55,6 +56,8 @@
 #include <tbb/concurrent_queue.h>
 #include <tbb/parallel_for.h>
 
+#include <chrono>
+#include <deque>
 #include <mutex>
 
 #include <include/cef_app.h>
@@ -122,6 +125,7 @@ class html_client
     , public CefLifeSpanHandler
     , public CefLoadHandler
     , public CefDisplayHandler
+    , public CefRequestHandler
 {
     std::wstring                        url_;
     spl::shared_ptr<diagnostics::graph> graph_;
@@ -137,6 +141,8 @@ class html_client
     bool                                 gpu_enabled_;
     bool                                 shared_texture_enable_;
     tbb::concurrent_queue<std::wstring>  javascript_before_load_;
+    std::mutex                          javascript_mutex_;
+    bool                                recovery_stopped_ = false;
     std::atomic<bool>                    loaded_;
     std::atomic<bool>                    not_found_;
     std::queue<presentation_frame>       frames_;
@@ -145,6 +151,8 @@ class html_client
     mutable std::mutex                   audio_frames_mutex_;
     const size_t                         frames_max_size_ = 4;
     std::atomic<bool>                    closing_;
+
+    std::deque<std::chrono::steady_clock::time_point> renderer_termination_times_;
 
     std::unique_ptr<ffmpeg::AudioResampler> audioResampler_;
 
@@ -197,9 +205,16 @@ class html_client
 
     void reload()
     {
-        html::begin_invoke([this] {
-            if (browser_ != nullptr)
+        html::invoke([this] {
+            if (browser_ != nullptr) {
+                {
+                    std::lock_guard<std::mutex> lock(javascript_mutex_);
+                    renderer_termination_times_.clear();
+                    loaded_           = false;
+                    recovery_stopped_ = false;
+                }
                 browser_->Reload();
+            }
         });
     }
 
@@ -296,6 +311,12 @@ class html_client
 
     void execute_javascript(const std::wstring& javascript)
     {
+        std::lock_guard<std::mutex> lock(javascript_mutex_);
+        if (recovery_stopped_)
+            CASPAR_THROW_EXCEPTION(invalid_operation()
+                                   << msg_info(print() + L" renderer recovery stopped; "
+                                                        L"manual RELOAD or REMOVE/LOAD is required."));
+
         if (!loaded_) {
             javascript_before_load_.push(javascript);
         } else {
@@ -304,19 +325,19 @@ class html_client
         }
     }
 
-    bool OnBeforePopup(CefRefPtr<CefBrowser>          browser,
-                       CefRefPtr<CefFrame>            frame,
-                       int                            popup_id,
-                       const CefString&               target_url,
-                       const CefString&               target_frame_name,
-                       WindowOpenDisposition          target_disposition,
-                       bool                           user_gesture,
-                       const CefPopupFeatures&        popupFeatures,
-                       CefWindowInfo&                 windowInfo,
-                       CefRefPtr<CefClient>&          client,
-                       CefBrowserSettings&            settings,
-                       CefRefPtr<CefDictionaryValue>& dict,
-                       bool*                          no_javascript_access) override
+    bool OnBeforePopup(CefRefPtr<CefBrowser>                      browser,
+                       CefRefPtr<CefFrame>                        frame,
+                       int                                        popup_id,
+                       const CefString&                           target_url,
+                       const CefString&                           target_frame_name,
+                       CefLifeSpanHandler::WindowOpenDisposition  target_disposition,
+                       bool                                       user_gesture,
+                       const CefPopupFeatures&                    popupFeatures,
+                       CefWindowInfo&                             windowInfo,
+                       CefRefPtr<CefClient>&                      client,
+                       CefBrowserSettings&                        settings,
+                       CefRefPtr<CefDictionaryValue>&             dict,
+                       bool*                                      no_javascript_access) override
     {
         // This blocks popup windows from opening, as they dont make sense and hit an exception in get_browser_host upon
         // closing
@@ -508,6 +529,51 @@ class html_client
 
     CefRefPtr<CefDisplayHandler> GetDisplayHandler() override { return this; }
 
+    CefRefPtr<CefRequestHandler> GetRequestHandler() override { return this; }
+
+    static constexpr int    max_renderer_reloads       = 5;
+    static constexpr double renderer_crash_window_secs = 60.0;
+
+    void OnRenderProcessTerminated(CefRefPtr<CefBrowser> browser,
+                                   TerminationStatus     status,
+                                   int                    error_code,
+                                   const CefString&       error_string) override
+    {
+        if (closing_)
+            return;
+
+        const auto now = std::chrono::steady_clock::now();
+        while (!renderer_termination_times_.empty() &&
+               std::chrono::duration<double>(now - renderer_termination_times_.front()).count() >=
+                   renderer_crash_window_secs)
+            renderer_termination_times_.pop_front();
+
+        {
+            std::lock_guard<std::mutex> lock(javascript_mutex_);
+            if (recovery_stopped_)
+                return;
+
+            loaded_ = false;
+            if (renderer_termination_times_.size() >= max_renderer_reloads) {
+                recovery_stopped_ = true;
+                std::wstring javascript;
+                while (javascript_before_load_.try_pop(javascript)) {
+                }
+                CASPAR_LOG(error) << "[html_producer] " << print() << L" renderer process terminated (status: "
+                                  << static_cast<int>(status) << L"); already reloaded after " << max_renderer_reloads
+                                  << L" terminations within " << static_cast<int>(renderer_crash_window_secs)
+                                  << L"s; giving up on automatic reload and discarding pending JavaScript. "
+                                  << L"Further JavaScript commands will fail. Manual RELOAD or REMOVE/LOAD is required.";
+                return;
+            }
+        }
+
+        renderer_termination_times_.push_back(now);
+        CASPAR_LOG(warning) << "[html_producer] " << print() << L" renderer process terminated (status: "
+                            << static_cast<int>(status) << L"), reloading.";
+        browser->Reload();
+    }
+
     void OnLoadError(CefRefPtr<CefBrowser> browser,
                      CefRefPtr<CefFrame>   frame,
                      ErrorCode             errorCode,
@@ -539,7 +605,11 @@ class html_client
 
     void OnLoadEnd(CefRefPtr<CefBrowser> browser, CefRefPtr<CefFrame> frame, int httpStatusCode) override
     {
-        if (not_found_)
+        if (!frame->IsMain())
+            return;
+
+        std::lock_guard<std::mutex> lock(javascript_mutex_);
+        if (not_found_ || recovery_stopped_)
             return;
 
         loaded_ = true;
