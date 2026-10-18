@@ -214,6 +214,47 @@ target_link_directories(OpenAL::OpenAL INTERFACE ${openal_SOURCE_DIR}/libs/Win64
 target_link_libraries(OpenAL::OpenAL INTERFACE OpenAL32)
 casparcg_add_runtime_dependency("${openal_SOURCE_DIR}/bin/Win64/OpenAL32.dll")
 
+# PortAudio (proaudio consumer) - optional, off by default.
+# Provides ASIO/WASAPI/WDM-KS/DirectSound multi-channel pro-audio output.
+option(ENABLE_PROAUDIO "Enable the PortAudio-based multi-channel pro-audio consumer" OFF)
+if (ENABLE_PROAUDIO)
+	# Steinberg's ASIO SDK cannot be redistributed - point this at your own local copy to enable ASIO
+	# (the directory containing common/asio.h, i.e. the SDK's top-level "ASIOSDK2.3" folder or similar).
+	# Without it, the module still builds with WASAPI/WDM-KS/DirectSound support only.
+	set(PROAUDIO_ASIO_SDK_PATH "" CACHE PATH "Path to a locally obtained Steinberg ASIO SDK (optional)")
+
+	set(PA_BUILD_STATIC ON CACHE BOOL "" FORCE)
+	set(PA_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+	set(PA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+	set(PA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+	set(PA_USE_WASAPI ON CACHE BOOL "" FORCE)
+	set(PA_USE_WDMKS ON CACHE BOOL "" FORCE)
+	set(PA_USE_DS ON CACHE BOOL "" FORCE)
+	set(PA_USE_WMME OFF CACHE BOOL "" FORCE)
+
+	if (PROAUDIO_ASIO_SDK_PATH)
+		# PortAudio's own cmake_support/FindASIOSDK.cmake looks for common/asio.h under this root and
+		# sets PA_USE_ASIO ON automatically once found - pre-seeding the cache here skips its directory
+		# globbing (which otherwise only checks for a sibling "as*" folder next to the portaudio sources).
+		set(ASIOSDK_ROOT_DIR "${PROAUDIO_ASIO_SDK_PATH}" CACHE PATH "" FORCE)
+		set(ASIOSDK_INCLUDE_DIR "${PROAUDIO_ASIO_SDK_PATH}/common" CACHE PATH "" FORCE)
+	else ()
+		message(STATUS "PROAUDIO_ASIO_SDK_PATH not set - building proaudio module without ASIO support.")
+	endif ()
+
+	FetchContent_Declare(portaudio
+		URL https://github.com/PortAudio/portaudio/archive/refs/tags/v19.7.0.tar.gz
+		DOWNLOAD_DIR ${CASPARCG_DOWNLOAD_CACHE}
+	)
+	FetchContent_MakeAvailable(portaudio)
+
+	# PA_BUILD_STATIC=ON/PA_BUILD_SHARED=OFF always produces a CMake target literally named
+	# "portaudio_static" (PA_LIBNAME_ADD_SUFFIX only affects the output filename, not this target name).
+	add_library(PortAudio::PortAudio INTERFACE IMPORTED)
+	target_link_libraries(PortAudio::PortAudio INTERFACE portaudio_static)
+	set(PORTAUDIO_FOUND TRUE)
+endif ()
+
 # flash template host
 casparcg_add_external_project(flashtemplatehost)
 ExternalProject_Add(flashtemplatehost
