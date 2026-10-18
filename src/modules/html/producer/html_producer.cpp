@@ -61,9 +61,14 @@
 #include <include/cef_client.h>
 #include <include/cef_render_handler.h>
 
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <deque>
 #include <optional>
 #include <queue>
 #include <utility>
+#include <vector>
 
 #include <ffmpeg/util/audio_resampler.h>
 
@@ -78,42 +83,22 @@
 
 namespace caspar { namespace html {
 
-inline std::int_least64_t now()
+// steady_clock, not system_clock/high_resolution_clock: CEF's audio pts is on Chromium's internal
+// monotonic clock (base::TimeTicks), not the Unix epoch its own header documents - the two are
+// comparable only via an explicitly monotonic clock on our side, calibrated once against pts
+// (see OnAudioStreamPacket).
+inline std::int64_t steady_now_ms()
 {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
-               std::chrono::high_resolution_clock::now().time_since_epoch())
+               std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
 
-struct presentation_frame
-{
-    std::int_least64_t timestamp;
-    core::draw_frame   frame;
+// Matches ffmpeg::AudioResampler's fixed AV_CHANNEL_LAYOUT_HEXADECAGONAL output.
+constexpr size_t kAudioChannels = 16;
 
-    explicit presentation_frame(core::draw_frame frame = {}, std::int_least64_t ts = now()) noexcept
-        : timestamp(ts)
-        , frame(std::move(frame))
-    {
-    }
-
-    presentation_frame(presentation_frame&& other) noexcept
-        : timestamp(other.timestamp)
-        , frame(std::move(other.frame))
-    {
-    }
-
-    presentation_frame(const presentation_frame&)            = delete;
-    presentation_frame& operator=(const presentation_frame&) = delete;
-
-    presentation_frame& operator=(presentation_frame&& rhs) noexcept
-    {
-        timestamp = rhs.timestamp;
-        frame     = std::move(rhs.frame);
-        return *this;
-    }
-
-    ~presentation_frame() {}
-};
+// How many CEF audio packets' worth of backlog to allow before dropping the oldest.
+constexpr size_t kAudioBacklogPackets = 4;
 
 class html_client
     : public CefClient
@@ -139,18 +124,43 @@ class html_client
     tbb::concurrent_queue<std::wstring>  javascript_before_load_;
     std::atomic<bool>                    loaded_;
     std::atomic<bool>                    not_found_;
-    std::queue<presentation_frame>       frames_;
-    std::queue<presentation_frame>       audio_frames_;
-    mutable std::mutex                   frames_mutex_;
-    mutable std::mutex                   audio_frames_mutex_;
-    const size_t                         frames_max_size_ = 4;
     std::atomic<bool>                    closing_;
 
     std::unique_ptr<ffmpeg::AudioResampler> audioResampler_;
 
-    core::draw_frame   last_video_frame_;
-    core::draw_frame   last_frame_;
-    std::int_least64_t last_frame_time_;
+    // Video and audio arrive on separate CEF threads. Keep video snapshots in a bounded queue, but
+    // retain audio separately until receive() consumes a tick; dropping an old video snapshot must
+    // never discard audio that is already due.
+    mutable std::mutex pairing_mutex_;
+    core::draw_frame   latest_video_frame_;
+    bool               has_video_frame_ = false;
+
+    // CEF's audio pts is documented as "milliseconds since the Unix Epoch" but is actually measured
+    // on Chromium's internal monotonic clock (base::TimeTicks, an arbitrary reference) - see
+    // OnAudioStreamPacket for the one-time calibration this requires before pts is comparable to
+    // steady_now_ms(). audio_buffer_ is a continuous PCM backlog, sliced when receive() consumes a
+    // tick rather than when either CEF callback arrives.
+    std::vector<std::int32_t>   audio_buffer_;
+    bool                        audio_stream_active_    = false;
+    bool                        audio_clock_calibrated_ = false;
+    std::int64_t                audio_clock_offset_ms_  = 0; // translates CEF pts -> steady_now_ms()
+    double                      audio_buffer_start_ms_  = 0; // steady-clock timestamp of the oldest buffered sample
+    std::optional<double>       next_audio_packet_pts_ms_;   // independent of backlog consumption and callback arrival
+    std::optional<std::int64_t> audio_wait_started_ms_;
+    std::optional<double>       audio_resume_floor_ms_;
+    bool                        audio_starved_ = false;
+
+    const size_t buffer_capacity_ = 4;
+    struct buffered_frame
+    {
+        core::draw_frame frame;
+        std::int64_t     timestamp_ms;
+    };
+    std::deque<buffered_frame>  buffer_;
+    mutable std::mutex          buffer_mutex_;
+    core::draw_frame            last_frame_;
+    std::int64_t                last_pop_timestamp_ms_ = 0;
+    std::optional<std::int64_t> dropped_video_start_ms_;
 
     CefRefPtr<CefBrowser> browser_;
 
@@ -214,84 +224,177 @@ class html_client
         });
     }
 
-    bool try_pop(const core::video_field field)
+    bool try_pop(const core::video_field field, int nb_samples, core::draw_frame& audio_slice, bool& video_updated)
     {
-        bool                        result = false;
-        std::lock_guard<std::mutex> lock(frames_mutex_);
+        std::lock_guard<std::mutex> pairing_lock(pairing_mutex_);
+        std::lock_guard<std::mutex> buffer_lock(buffer_mutex_);
+        const auto                  now_time = steady_now_ms();
+        video_updated                        = false;
 
-        core::draw_frame audio_frame;
-        uint64_t         audio_frame_timestamp = 0;
+        const auto take_samples  = static_cast<size_t>(nb_samples);
+        const auto take_elements = take_samples * kAudioChannels;
 
-        {
-            std::lock_guard<std::mutex> audio_lock(audio_frames_mutex_);
-            if (!audio_frames_.empty()) {
-                audio_frame_timestamp = audio_frames_.front().timestamp;
-                audio_frame           = core::draw_frame(std::move(audio_frames_.front().frame));
-                audio_frames_.pop();
+        const auto terminating = closing_ || not_found_;
+        // Preserve the interlace stutter heuristic before consuming or resynchronizing either stream.
+        if (!terminating && field == core::video_field::a && buffer_.size() == 1) {
+            const auto follows_gap_in_frames    = (now_time - last_pop_timestamp_ms_) > 100;
+            const auto time_per_frame           = (1000 * 1.5) / format_desc_.fps;
+            const auto front_frame_is_too_young = (now_time - buffer_.front().timestamp_ms) < time_per_frame;
+            if (follows_gap_in_frames && front_frame_is_too_young) {
+                return false;
             }
         }
 
-        if (!frames_.empty()) {
-            /*
-             * CEF in gpu-enabled mode only sends frames when something changes, and interlaced channels
-             * consume two frames in a short time span.
-             * This can interact poorly and cause the second
-             * field of an animation repeat the first.
-             * If there is a single field in the buffer, it may
-             * want delaying to avoid this stutter.
-             * The hazard here is that sometimes animations will
-             * start a field later than intended.
-             */
-            if (field == core::video_field::a && frames_.size() == 1) {
-                auto now_time = now();
+        size_t     video_count = 0;
+        const auto audio_ready = [&] {
+            if (nb_samples <= 0 || terminating || !audio_clock_calibrated_)
+                return false;
 
-                // Make sure there has been a gap before this pop, of at least a couple of frames
-                auto follows_gap_in_frames = (now_time - last_frame_time_) > 100;
+            if (audio_resume_floor_ms_ && audio_buffer_start_ms_ < *audio_resume_floor_ms_) {
+                const auto skip_samples =
+                    std::min(audio_buffer_.size() / kAudioChannels,
+                             static_cast<size_t>(std::ceil((*audio_resume_floor_ms_ - audio_buffer_start_ms_) *
+                                                           format_desc_.audio_sample_rate / 1000.0)));
+                audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + skip_samples * kAudioChannels);
+                audio_buffer_start_ms_ += skip_samples * 1000.0 / format_desc_.audio_sample_rate;
+            }
+            if (audio_buffer_.size() < take_elements)
+                return false;
 
-                // Check if the sole buffered frame is too young to have a partner field generated (with a tolerance)
-                auto time_per_frame           = (1000 * 1.5) / format_desc_.fps;
-                auto front_frame_is_too_young = (now_time - frames_.front().timestamp) < time_per_frame;
-
-                if (follows_gap_in_frames && front_frame_is_too_young) {
+            const auto last_image_is_valid =
+                last_frame_ && last_pop_timestamp_ms_ <= audio_buffer_start_ms_ &&
+                (!dropped_video_start_ms_ || audio_buffer_start_ms_ < *dropped_video_start_ms_);
+            const auto first_video_ms = buffer_.empty() ? last_pop_timestamp_ms_ : buffer_.front().timestamp_ms;
+            if (!last_image_is_valid && (!buffer_.empty() || last_frame_) && first_video_ms > audio_buffer_start_ms_) {
+                // The image for this PCM was lost (or predates the first paint). Waiting for both
+                // bounded queues to catch up can preserve the same gap forever; discard only the
+                // unmatchable prefix, rounding forward to a complete sample.
+                const auto skip_samples =
+                    std::min(audio_buffer_.size() / kAudioChannels,
+                             static_cast<size_t>(std::ceil((first_video_ms - audio_buffer_start_ms_) *
+                                                           format_desc_.audio_sample_rate / 1000.0)));
+                audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + skip_samples * kAudioChannels);
+                audio_buffer_start_ms_ += skip_samples * 1000.0 / format_desc_.audio_sample_rate;
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "audio-video-resync");
+                if (audio_buffer_.size() < take_elements) {
                     return false;
                 }
             }
+            const auto tick_duration_ms = take_samples * 1000.0 / format_desc_.audio_sample_rate;
+            if (audio_buffer_start_ms_ > now_time + tick_duration_ms) {
+                return false;
+            }
+            // A snapshot remains valid until the next paint. Select the latest snapshot at the
+            // PCM interval's start, not an old FIFO entry paired with wall-clock-current audio.
+            for (const auto& frame : buffer_) {
+                if (frame.timestamp_ms > audio_buffer_start_ms_)
+                    break;
+                ++video_count;
+            }
+            if (video_count == 0 && (!last_frame_ || last_pop_timestamp_ms_ > audio_buffer_start_ms_ ||
+                                     (dropped_video_start_ms_ && *dropped_video_start_ms_ <= audio_buffer_start_ms_))) {
+                return false;
+            }
+            return true;
+        };
+        const auto use_audio = audio_ready();
 
-            last_frame_time_  = frames_.front().timestamp;
-            last_video_frame_ = std::move(frames_.front().frame);
-            last_frame_       = last_video_frame_;
-            frames_.pop();
-
-            graph_->set_value("buffered-frames", (double)frames_.size() / frames_max_size_);
-
-            result = true;
+        if (use_audio) {
+            std::vector<std::int32_t> taken(audio_buffer_.begin(), audio_buffer_.begin() + take_elements);
+            audio_slice = core::draw_frame(
+                core::mutable_frame(this, {}, array<std::int32_t>(std::move(taken)), core::pixel_format_desc()));
+            audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + take_elements);
+            audio_buffer_start_ms_ += take_samples * 1000.0 / format_desc_.audio_sample_rate;
+            audio_wait_started_ms_.reset();
+            audio_resume_floor_ms_.reset();
+            if (audio_starved_) {
+                audio_starved_ = false;
+                graph_->set_tag(diagnostics::tag_severity::INFO, "audio-stream-resumed");
+            }
+        } else {
+            if (nb_samples > 0 && !terminating && (audio_stream_active_ || audio_clock_calibrated_)) {
+                if (audio_stream_active_ && !audio_starved_) {
+                    if (!audio_wait_started_ms_)
+                        audio_wait_started_ms_ = now_time;
+                    // Bound all audio synchronization waits by the existing four-packet buffering budget.
+                    const auto wait_budget_ms =
+                        kAudioBacklogPackets *
+                        *std::max_element(format_desc_.audio_cadence.begin(), format_desc_.audio_cadence.end()) *
+                        1000.0 / format_desc_.audio_sample_rate;
+                    if (now_time - *audio_wait_started_ms_ < wait_budget_ms)
+                        return false;
+                    audio_starved_ = true;
+                    audio_buffer_.clear();
+                    graph_->set_tag(diagnostics::tag_severity::WARNING, "audio-stream-underflow");
+                }
+                if (!audio_stream_active_)
+                    audio_buffer_.clear();
+                // Once video advances without audio, do not replay PCM from the skipped interval.
+                audio_resume_floor_ms_ = now_time;
+                auto silence           = std::vector<std::int32_t>(take_elements, 0);
+                audio_slice            = core::draw_frame(
+                    core::mutable_frame(this, {}, array<std::int32_t>(std::move(silence)), core::pixel_format_desc()));
+            }
+            if (!buffer_.empty())
+                video_count = audio_starved_ ? buffer_.size() : 1;
         }
 
-        if (audio_frame) {
-            last_frame_time_ = audio_frame_timestamp;
-            last_frame_      = core::draw_frame::over(last_video_frame_, audio_frame);
-            result           = true;
+        if (video_count > 0) {
+            last_pop_timestamp_ms_ = buffer_[video_count - 1].timestamp_ms;
+            last_frame_            = std::move(buffer_[video_count - 1].frame);
+            buffer_.erase(buffer_.begin(), buffer_.begin() + video_count);
+            dropped_video_start_ms_.reset();
+            video_updated = true;
         }
+        graph_->set_value("buffered-frames", (double)buffer_.size() / buffer_capacity_);
 
-        return result;
+        return video_updated || static_cast<bool>(audio_slice);
     }
 
-    core::draw_frame receive(const core::video_field field)
+    core::draw_frame receive(const core::video_field field, int nb_samples)
     {
-        if (!try_pop(field)) {
+        core::draw_frame audio_slice;
+        bool             video_updated = false;
+        if (!try_pop(field, nb_samples, audio_slice, video_updated)) {
             graph_->set_tag(diagnostics::tag_severity::SILENT, "late-frame");
-            return core::draw_frame::still(last_frame_);
-        } else {
-            return last_frame_;
         }
+
+        auto video_frame = video_updated ? last_frame_ : core::draw_frame::still(last_frame_);
+        if (!audio_slice)
+            return video_frame;
+
+        return core::draw_frame::over(std::move(video_frame), std::move(audio_slice));
     }
 
     core::draw_frame last_frame() const { return core::draw_frame::still(last_frame_); }
 
     bool is_ready() const
     {
-        std::lock_guard<std::mutex> lock(frames_mutex_);
-        return !frames_.empty() || last_frame_;
+        std::lock_guard<std::mutex> lock(buffer_mutex_);
+        return !buffer_.empty() || last_frame_;
+    }
+
+    // Must be called with pairing_mutex_ held. Keep only video snapshots in buffer_; audio remains
+    // in audio_buffer_ until receive() consumes it, so queue overflow cannot discard due audio.
+    void enqueue_video_frame_locked()
+    {
+        if (!has_video_frame_) {
+            return;
+        }
+
+        auto now_ms = steady_now_ms();
+
+        {
+            std::lock_guard<std::mutex> buf_lock(buffer_mutex_);
+            buffer_.push_back({latest_video_frame_, now_ms});
+            if (buffer_.size() > buffer_capacity_) {
+                if (!dropped_video_start_ms_)
+                    dropped_video_start_ms_ = buffer_.front().timestamp_ms;
+                buffer_.pop_front();
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+            }
+            graph_->set_value("buffered-frames", (double)buffer_.size() / buffer_capacity_);
+        }
     }
 
     void execute_javascript(const std::wstring& javascript)
@@ -385,16 +488,12 @@ class html_client
         graph_->set_value("memcpy", test_timer_.elapsed() * format_desc_.fps * 0.5 * 5);
 
         {
-            std::lock_guard<std::mutex> lock(frames_mutex_);
-
             core::draw_frame new_frame = core::draw_frame(std::move(frame));
 
-            frames_.push(presentation_frame(std::move(new_frame)));
-            while (frames_.size() > frames_max_size_) {
-                frames_.pop();
-                graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
-            }
-            graph_->set_value("buffered-frames", (double)frames_.size() / frames_max_size_);
+            std::lock_guard<std::mutex> lock(pairing_mutex_);
+            latest_video_frame_ = std::move(new_frame);
+            has_video_frame_    = true;
+            enqueue_video_frame_locked();
         }
     }
 
@@ -440,14 +539,10 @@ class html_client
                     core::draw_frame dframe(std::move(frame));
 
                     {
-                        std::lock_guard<std::mutex> lock(frames_mutex_);
-
-                        frames_.push(presentation_frame(std::move(dframe)));
-                        while (frames_.size() > 4) {
-                            frames_.pop();
-                            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
-                        }
-                        graph_->set_value("buffered-frames", (double)frames_.size() / frames_max_size_);
+                        std::lock_guard<std::mutex> lock(pairing_mutex_);
+                        latest_video_frame_ = std::move(dframe);
+                        has_video_frame_    = true;
+                        enqueue_video_frame_locked();
                     }
                 }
             }
@@ -527,8 +622,8 @@ class html_client
         not_found_ = true;
         // Stop producing if the page fails to load
         {
-            std::lock_guard<std::mutex> lock(frames_mutex_);
-            frames_.push(presentation_frame());
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            buffer_.push_back({core::draw_frame{}, steady_now_ms()});
         }
 
         {
@@ -558,8 +653,8 @@ class html_client
             this->close();
 
             {
-                std::lock_guard<std::mutex> lock(frames_mutex_);
-                frames_.push(presentation_frame());
+                std::lock_guard<std::mutex> lock(buffer_mutex_);
+                buffer_.push_back({core::draw_frame{}, steady_now_ms()});
             }
 
             {
@@ -585,34 +680,102 @@ class html_client
         params.channel_layout    = CEF_CHANNEL_LAYOUT_7_1;
         params.sample_rate       = format_desc_.audio_sample_rate;
         params.frames_per_buffer = format_desc_.audio_cadence[0];
-        return format_desc_.audio_cadence.size() == 1; // TODO - handle 59.94
+        return true; // true keeps audio routed into the mixer; false would leak it to system audio instead
     }
 
     void OnAudioStreamStarted(CefRefPtr<CefBrowser> browser, const CefAudioParameters& params, int channels) override
     {
-        audioResampler_ = std::make_unique<ffmpeg::AudioResampler>(params.sample_rate, AV_SAMPLE_FMT_FLTP);
+        // A restarted stream's pts isn't guaranteed to continue from where the last one left off -
+        // force recalibration (see OnAudioStreamPacket) rather than reuse a possibly-stale offset.
+        std::lock_guard<std::mutex> lock(pairing_mutex_);
+        audio_stream_active_    = true;
+        audio_clock_calibrated_ = false;
+        next_audio_packet_pts_ms_.reset();
+        audio_buffer_.clear();
+        audioResampler_.reset();
+        try {
+            audioResampler_ = std::make_unique<ffmpeg::AudioResampler>(params.sample_rate, AV_SAMPLE_FMT_FLTP);
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+        }
     }
     void OnAudioStreamPacket(CefRefPtr<CefBrowser> browser, const float** data, int samples, int64_t pts) override
     {
+        std::lock_guard<std::mutex> lock(pairing_mutex_);
         if (!audioResampler_)
             return;
 
-        auto audio       = audioResampler_->convert(samples, reinterpret_cast<const void**>(data));
-        auto audio_frame = core::mutable_frame(this, {}, std::move(audio), core::pixel_format_desc());
+        caspar::array<std::int32_t> audio;
+        try {
+            audio = audioResampler_->convert(samples, reinterpret_cast<const void**>(data));
+        } catch (...) {
+            CASPAR_LOG_CURRENT_EXCEPTION();
+            audio_buffer_.clear();
+            audio_clock_calibrated_ = false;
+            next_audio_packet_pts_ms_.reset();
+            return;
+        }
 
-        {
-            std::lock_guard<std::mutex> lock(audio_frames_mutex_);
-            while (audio_frames_.size() >= frames_max_size_) {
-                audio_frames_.pop();
+        auto now_ms          = steady_now_ms();
+        auto expected_offset = now_ms - pts;
+
+        if (!audio_clock_calibrated_) {
+            audio_clock_offset_ms_  = expected_offset;
+            audio_clock_calibrated_ = true;
+        } else {
+            auto offset_delta = expected_offset > audio_clock_offset_ms_ ? expected_offset - audio_clock_offset_ms_
+                                                                         : audio_clock_offset_ms_ - expected_offset;
+            if (offset_delta > 1000) {
+                // CEF's audio clock reference has shifted (e.g. a stalled/backgrounded tab resuming)
+                // - hard resync rather than let stale buffered samples/position tracking stay wrong.
+                audio_buffer_.clear();
+                audio_clock_offset_ms_ = expected_offset;
+                next_audio_packet_pts_ms_.reset();
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "audio-clock-resync");
             }
-            audio_frames_.push(presentation_frame(core::draw_frame(std::move(audio_frame))));
+        }
+
+        const auto packet_ms = samples * 1000.0 / format_desc_.audio_sample_rate;
+        // Integer-millisecond PTS can round adjacent packets differently; do not mistake that for a gap.
+        if (next_audio_packet_pts_ms_ &&
+            std::abs(pts - *next_audio_packet_pts_ms_) > std::max(2.0, packet_ms * 0.5)) {
+            audio_buffer_.clear();
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "audio-timestamp-discontinuity");
+        }
+        next_audio_packet_pts_ms_ = pts + packet_ms;
+
+        if (audio.size() > 0) {
+            if (audio_buffer_.empty()) {
+                audio_buffer_start_ms_ = static_cast<double>(pts + audio_clock_offset_ms_);
+            }
+
+            audio_buffer_.insert(audio_buffer_.end(), audio.data(), audio.data() + audio.size());
+
+            // Cap backlog to a fixed number of cadence-sized packets, even if resampling returns no samples.
+            const auto max_buffered_samples =
+                kAudioBacklogPackets * static_cast<size_t>(format_desc_.audio_cadence[0]) * kAudioChannels;
+            if (audio_buffer_.size() > max_buffered_samples) {
+                auto dropped_elements = audio_buffer_.size() - max_buffered_samples;
+                audio_buffer_.erase(audio_buffer_.begin(), audio_buffer_.begin() + dropped_elements);
+                audio_buffer_start_ms_ +=
+                    dropped_elements / double(kAudioChannels) * 1000.0 / format_desc_.audio_sample_rate;
+                graph_->set_tag(diagnostics::tag_severity::WARNING, "audio-buffer-overflow");
+            }
         }
     }
-    void OnAudioStreamStopped(CefRefPtr<CefBrowser> browser) override { audioResampler_ = nullptr; }
+    void OnAudioStreamStopped(CefRefPtr<CefBrowser> browser) override
+    {
+        std::lock_guard<std::mutex> lock(pairing_mutex_);
+        audioResampler_      = nullptr;
+        audio_stream_active_ = false;
+        audio_buffer_.clear();
+        audio_clock_calibrated_ = false;
+        next_audio_packet_pts_ms_.reset();
+    }
     void OnAudioStreamError(CefRefPtr<CefBrowser> browser, const CefString& message) override
     {
         CASPAR_LOG(info) << "[html_producer] OnAudioStreamError: \"" << message.ToString() << "\"";
-        audioResampler_ = nullptr;
+        OnAudioStreamStopped(browser);
     }
 
     void do_execute_javascript(const std::wstring& javascript)
@@ -688,7 +851,7 @@ class html_producer : public core::frame_producer
     core::draw_frame receive_impl(const core::video_field field, int nb_samples) override
     {
         if (client_ != nullptr) {
-            return client_->receive(field);
+            return client_->receive(field, nb_samples);
         }
 
         return core::draw_frame::empty();
