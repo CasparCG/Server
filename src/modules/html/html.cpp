@@ -39,6 +39,7 @@
 
 #include <memory>
 #include <utility>
+#include <cstring>
 
 #include <include/cef_api_hash.h>
 #include <include/cef_app.h>
@@ -281,7 +282,21 @@ void init(const core::module_dependencies& dependencies)
     }
 #endif
 // Malinfo patch section 2 end - Remove once fixed upstream.
-    dependencies.producer_registry->register_producer_factory(L"HTML Producer", html::create_producer);
+
+    // Validate the selected CEF API against the loaded library, including after system package updates.
+    // A mismatch means libcef.so doesn't honor the API-version contract CasparCG was built against, so
+    // don't risk calling CefInitialize() into undefined behavior - fail the same way a CefInitialize()
+    // failure below does, rather than just logging and continuing anyway.
+    const char* actual_hash = cef_api_hash(CEF_API_VERSION, 0);
+    if (!actual_hash || std::strcmp(actual_hash, CEF_API_HASH_PLATFORM) != 0) {
+        CASPAR_LOG(error) << L"[html] CEF API hash mismatch (built-against=" << CEF_API_HASH_PLATFORM
+                          << L", installed=" << (actual_hash ? actual_hash : "(null)")
+                          << L"). This build and the installed CEF library disagree on the API shape; "
+                             L"refusing to initialize CEF rather than risk undefined behavior. Rebuild "
+                             L"against the installed casparcg-cef-api15000-dev package, or reinstall the "
+                             L"CEF version this build expects.";
+        return;
+    }
 
     CefMainArgs main_args;
     g_cef_executor = std::make_unique<executor>(L"cef");
@@ -320,6 +335,10 @@ void init(const core::module_dependencies& dependencies)
                      << cef_version_info(2) << " (Chromium " << cef_version_info(4) << "." << cef_version_info(5)
                      << "." << cef_version_info(6) << "." << cef_version_info(7) << "), API version "
                      << cef_api_version() << ". Built against CEF " << CEF_VERSION;
+
+    // Only register the producer factory once CEF has actually initialized successfully, so a load
+    // attempt can't reach html::create_producer (and post tasks to a never-initialized CEF) above.
+    dependencies.producer_registry->register_producer_factory(L"HTML Producer", html::create_producer);
 
     g_cef_executor->begin_invoke([&] { CefRunMessageLoop(); });
     dependencies.cg_registry->register_cg_producer(
