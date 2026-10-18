@@ -24,9 +24,7 @@
 
 #include "newtek_ndi_consumer.h"
 
-#include <boost/thread/exceptions.hpp>
 #include <chrono>
-#include <condition_variable>
 #include <core/consumer/channel_info.h>
 #include <core/consumer/frame_consumer.h>
 #include <core/frame/frame.h>
@@ -37,7 +35,6 @@
 #include <common/diagnostics/graph.h>
 #include <common/env.h>
 #include <common/except.h>
-#include <common/executor.h>
 #include <common/future.h>
 #include <common/param.h>
 #include <common/timer.h>
@@ -47,6 +44,8 @@
 #include <boost/thread.hpp>
 #include <ratio>
 #include <thread>
+
+#include <tbb/concurrent_queue.h>
 
 #include "../util/ndi.h"
 
@@ -61,25 +60,21 @@ struct newtek_ndi_consumer : public core::frame_consumer
     const std::string       discovery_server_url_;
     const bool              use_advertiser_;
     const bool              allow_monitoring_;
+    const int               buffer_size_;
 
-    core::video_format_desc              format_desc_;
-    int                                  channel_index_;
-    NDIlib_v6*                           ndi_lib_;
-    NDIlib_video_frame_v2_t              ndi_video_frame_;
-    NDIlib_audio_frame_interleaved_32s_t ndi_audio_frame_;
-    std::shared_ptr<uint8_t>             field_data_;
-    spl::shared_ptr<diagnostics::graph>  graph_;
-    caspar::timer                        tick_timer_;
-    caspar::timer                        frame_timer_;
-    caspar::timer                        ndi_timer_;
-    int                                  frame_no_;
-    std::mutex                           buffer_mutex_;
-    std::condition_variable              buffer_cond_;
-    std::condition_variable              worker_cond_;
-    bool                                 ready_for_frame_;
-    std::queue<core::const_frame>        buffer_;
-    boost::thread                        send_thread;
-    executor                             executor_;
+    core::video_format_desc                          format_desc_;
+    int                                              channel_index_;
+    NDIlib_v6*                                       ndi_lib_;
+    NDIlib_video_frame_v2_t                          ndi_video_frame_;
+    NDIlib_audio_frame_interleaved_32s_t             ndi_audio_frame_;
+    std::shared_ptr<uint8_t>                         field_data_;
+    spl::shared_ptr<diagnostics::graph>              graph_;
+    caspar::timer                                    tick_timer_;
+    caspar::timer                                    frame_timer_;
+    caspar::timer                                    ndi_timer_;
+    int                                              frame_no_;
+    tbb::concurrent_bounded_queue<core::const_frame> frame_buffer_;
+    boost::thread                                    send_thread;
 
     std::unique_ptr<NDIlib_send_instance_t, std::function<void(NDIlib_send_instance_t*)>> ndi_send_instance_;
     std::unique_ptr<NDIlib_send_advertiser_instance_t, std::function<void(NDIlib_send_advertiser_instance_t*)>>
@@ -90,7 +85,8 @@ struct newtek_ndi_consumer : public core::frame_consumer
                         bool         allow_fields,
                         std::string  discovery_server_url = "",
                         bool         use_advertiser       = false,
-                        bool         allow_monitoring     = true)
+                        bool         allow_monitoring     = true,
+                        int          buffer_size          = 16)
         : name_(!name.empty() ? name : default_ndi_name())
         , instance_no_(instances_++)
         , frame_no_(0)
@@ -98,14 +94,15 @@ struct newtek_ndi_consumer : public core::frame_consumer
         , discovery_server_url_(discovery_server_url)
         , use_advertiser_(use_advertiser)
         , allow_monitoring_(allow_monitoring)
+        , buffer_size_(buffer_size > 0 ? buffer_size : 1)
         , channel_index_(0)
-        , executor_(L"ndi_consumer[" + std::to_wstring(instance_no_) + L"]")
     {
         ndi_lib_ = ndi::load_library();
         graph_->set_text(print());
         graph_->set_color("frame-time", diagnostics::color(0.5f, 1.0f, 0.2f));
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("buffered-frames", diagnostics::color(0.5f, 0.0f, 0.2f));
+        graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
         graph_->set_color("ndi-tick", diagnostics::color(1.0f, 1.0f, 0.1f));
         diagnostics::register_graph(graph_);
     }
@@ -113,7 +110,11 @@ struct newtek_ndi_consumer : public core::frame_consumer
     ~newtek_ndi_consumer()
     {
         if (send_thread.joinable()) {
-            send_thread.interrupt();
+            // Drop any queued frames, then push an empty sentinel frame to wake the send
+            // thread and signal shutdown. Clearing first bounds shutdown latency to a
+            // single frame instead of draining the whole buffer at playback speed.
+            frame_buffer_.clear();
+            frame_buffer_.push(core::const_frame{});
             send_thread.join();
         }
     }
@@ -124,6 +125,9 @@ struct newtek_ndi_consumer : public core::frame_consumer
                     const core::channel_info&      channel_info,
                     int                            port_index) override
     {
+        if (send_thread.joinable())
+            CASPAR_THROW_EXCEPTION(invalid_operation() << msg_info("Cannot reinitialize ndi-consumer."));
+
         format_desc_   = format_desc;
         channel_index_ = channel_info.index;
 
@@ -208,82 +212,86 @@ struct newtek_ndi_consumer : public core::frame_consumer
         graph_->set_text(print());
         // CASPAR_VERIFY(ndi_send_instance_);
 
+        frame_buffer_.set_capacity(buffer_size_);
+
         send_thread = boost::thread([this]() {
             set_thread_realtime_priority();
             set_thread_name(L"NDI-SEND: " + name_);
             CASPAR_LOG(info) << L"Starting ndi-send thread for ndi output: " << name_;
-            try {
-                auto buffer_size = buffer_.size();
-                // Buffer a few frames to keep NDI going when caspar is slow on a few frames
-                // This can be removed when CasparCG doesn't periodally slows down on frames
-                while (!send_thread.interruption_requested()) {
-                    {
-                        std::unique_lock<std::mutex> lock(buffer_mutex_);
-                        worker_cond_.wait(lock, [&] { return buffer_.size() > buffer_size; });
-                        graph_->set_value("buffered-frames", static_cast<double>(buffer_.size() + 0.001) / 8);
-                        buffer_size = buffer_.size();
-                        if (buffer_.size() >= 8) {
-                            break;
-                        }
-                    }
+
+            // Use a steady clock to generate a near perfect NDI tick time. The clock is
+            // aligned once playout starts so there is no catch-up burst.
+            auto frametimeUs = static_cast<int>(1000000 / format_desc_.fps);
+            auto time_point  = std::chrono::steady_clock::time_point{};
+            bool first       = true;
+
+            while (true) {
+                core::const_frame frame;
+                frame_buffer_.pop(frame);
+                if (!frame) {
+                    // An empty sentinel frame signals shutdown.
+                    break;
                 }
 
-                // Use steady clock to generate a near perfect NDI tick time.
-                auto frametimeUs = static_cast<int>(1000000 / format_desc_.fps);
-                auto time_point  = std::chrono::steady_clock::now();
-                time_point += std::chrono::microseconds(frametimeUs);
-                while (!send_thread.interruption_requested()) {
-                    core::const_frame frame;
-                    {
-                        std::unique_lock<std::mutex> lock(buffer_mutex_);
-                        worker_cond_.wait(lock, [&] { return !buffer_.empty(); });
-                        graph_->set_value("buffered-frames", static_cast<double>(buffer_.size() + 0.001) / 8);
-                        frame = std::move(buffer_.front());
-                        buffer_.pop();
-                    }
-                    graph_->set_value("ndi-tick", ndi_timer_.elapsed() * format_desc_.fps * 0.5);
-                    ndi_timer_.restart();
-                    frame_timer_.restart();
-                    auto audio_data             = frame.audio_data();
-                    int  audio_data_size        = static_cast<int>(audio_data.size());
-                    ndi_audio_frame_.no_samples = audio_data_size / format_desc_.audio_channels;
-                    ndi_audio_frame_.p_data     = const_cast<int*>(audio_data.data());
-                    ndi_lib_->util_send_send_audio_interleaved_32s(*ndi_send_instance_, &ndi_audio_frame_);
-                    if (format_desc_.field_count == 2 && allow_fields_) {
-                        ndi_video_frame_.frame_format_type =
-                            (frame_no_ % 2 ? NDIlib_frame_format_type_field_1 : NDIlib_frame_format_type_field_0);
-                        for (auto y = 0; y < ndi_video_frame_.yres; ++y) {
-                            std::memcpy(reinterpret_cast<char*>(ndi_video_frame_.p_data) + y * format_desc_.width * 4,
-                                        frame.image_data(0).data() + (y * 2 + frame_no_ % 2) * format_desc_.width * 4,
-                                        format_desc_.width * 4);
-                        }
-                    } else {
-                        ndi_video_frame_.p_data = const_cast<uint8_t*>(frame.image_data(0).begin());
-                    }
-                    ndi_lib_->send_send_video_v2(*ndi_send_instance_, &ndi_video_frame_);
-                    frame_no_++;
-                    graph_->set_value("frame-time", frame_timer_.elapsed() * format_desc_.fps * 0.5);
-                    std::this_thread::sleep_until(time_point);
-                    time_point += std::chrono::microseconds(frametimeUs);
+                if (first) {
+                    // De-jitter pre-roll: once the first frame has arrived, let the producer
+                    // build a small cushion before playout so brief upstream stalls do not
+                    // underrun the NDI output. The cushion is half the buffer capacity, so a
+                    // tiny buffer keeps latency minimal.
+                    const int prebuffer = buffer_size_ / 2;
+                    std::this_thread::sleep_for(
+                        std::chrono::microseconds(static_cast<int64_t>(frametimeUs) * prebuffer));
+                    time_point = std::chrono::steady_clock::now() + std::chrono::microseconds(frametimeUs);
+                    first      = false;
                 }
-            } catch (boost::thread_interrupted) {
-                // NOTHING
+
+                graph_->set_value("buffered-frames", static_cast<double>(frame_buffer_.size() + 0.001) / buffer_size_);
+                graph_->set_value("ndi-tick", ndi_timer_.elapsed() * format_desc_.fps * 0.5);
+                ndi_timer_.restart();
+                frame_timer_.restart();
+
+                auto audio_data             = frame.audio_data();
+                int  audio_data_size        = static_cast<int>(audio_data.size());
+                ndi_audio_frame_.no_samples = audio_data_size / format_desc_.audio_channels;
+                ndi_audio_frame_.p_data     = const_cast<int*>(audio_data.data());
+                ndi_lib_->util_send_send_audio_interleaved_32s(*ndi_send_instance_, &ndi_audio_frame_);
+
+                if (format_desc_.field_count == 2 && allow_fields_) {
+                    ndi_video_frame_.frame_format_type =
+                        (frame_no_ % 2 ? NDIlib_frame_format_type_field_1 : NDIlib_frame_format_type_field_0);
+                    for (auto y = 0; y < ndi_video_frame_.yres; ++y) {
+                        std::memcpy(reinterpret_cast<char*>(ndi_video_frame_.p_data) + y * format_desc_.width * 4,
+                                    frame.image_data(0).data() + (y * 2 + frame_no_ % 2) * format_desc_.width * 4,
+                                    format_desc_.width * 4);
+                    }
+                } else {
+                    ndi_video_frame_.p_data = const_cast<uint8_t*>(frame.image_data(0).begin());
+                }
+
+                ndi_lib_->send_send_video_v2(*ndi_send_instance_, &ndi_video_frame_);
+                frame_no_++;
+
+                graph_->set_value("frame-time", frame_timer_.elapsed() * format_desc_.fps * 0.5);
+                std::this_thread::sleep_until(time_point);
+                time_point += std::chrono::microseconds(frametimeUs);
             }
         });
     }
 
     std::future<bool> send(core::video_field field, core::const_frame frame) override
     {
-        return executor_.begin_invoke([=, this] {
-            graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5);
-            tick_timer_.restart();
-            {
-                std::unique_lock<std::mutex> lock(buffer_mutex_);
-                buffer_.push(std::move(frame));
-            }
-            worker_cond_.notify_all();
-            return true;
-        });
+        graph_->set_value("tick-time", tick_timer_.elapsed() * format_desc_.fps * 0.5);
+        tick_timer_.restart();
+
+        // The producer enforces the buffer bound: if the send thread cannot keep up the
+        // oldest-rejected frame is dropped here, so memory never grows unbounded.
+        if (!frame_buffer_.try_push(std::move(frame))) {
+            graph_->set_tag(diagnostics::tag_severity::WARNING, "dropped-frame");
+        }
+
+        graph_->set_value("buffered-frames", static_cast<double>(frame_buffer_.size() + 0.001) / buffer_size_);
+
+        return make_ready_future(true);
     }
 
     std::wstring print() const override
@@ -314,6 +322,7 @@ struct newtek_ndi_consumer : public core::frame_consumer
         state["ndi/use_advertiser"]       = use_advertiser_;
         state["ndi/allow_monitoring"]     = allow_monitoring_;
         state["ndi/discovery_server_url"] = discovery_server_url_;
+        state["ndi/buffer_size"]          = buffer_size_;
         return state;
     }
 };
@@ -336,13 +345,14 @@ create_ndi_consumer(const std::vector<std::wstring>&                         par
     bool         allow_fields           = contains_param(L"ALLOW_FIELDS", params);
     bool         use_advertiser         = contains_param(L"USE_ADVERTISER", params);
     bool         allow_monitoring       = get_param(L"ALLOW_MONITORING", params, true);
+    int          buffer_size            = get_param(L"BUFFER_SIZE", params, 16);
     std::wstring discovery_server_url_w = get_param(L"DISCOVERY_SERVER", params, L"");
     if (discovery_server_url_w.empty())
         discovery_server_url_w = env::properties().get(L"configuration.ndi.discovery-server", L"");
     std::string discovery_server_url = ndi::apply_default_discovery_port(u8(discovery_server_url_w));
 
     return spl::make_shared<newtek_ndi_consumer>(
-        name, allow_fields, discovery_server_url, use_advertiser, allow_monitoring);
+        name, allow_fields, discovery_server_url, use_advertiser, allow_monitoring, buffer_size);
 }
 
 spl::shared_ptr<core::frame_consumer>
@@ -355,6 +365,7 @@ create_preconfigured_ndi_consumer(const boost::property_tree::wptree&           
     bool         allow_fields           = ptree.get(L"allow-fields", false);
     bool         use_advertiser         = ptree.get(L"use-advertiser", false);
     bool         allow_monitoring       = ptree.get(L"allow-monitoring", true);
+    int          buffer_size            = ptree.get(L"buffer-size", 16);
     std::wstring discovery_server_url_w = ptree.get(L"discovery-server", L"");
     if (discovery_server_url_w.empty())
         discovery_server_url_w = env::properties().get(L"configuration.ndi.discovery-server", L"");
@@ -364,7 +375,7 @@ create_preconfigured_ndi_consumer(const boost::property_tree::wptree&           
         CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info("Newtek NDI consumer only supports 8-bit color depth."));
 
     return spl::make_shared<newtek_ndi_consumer>(
-        name, allow_fields, discovery_server_url, use_advertiser, allow_monitoring);
+        name, allow_fields, discovery_server_url, use_advertiser, allow_monitoring, buffer_size);
 }
 
 }} // namespace caspar::newtek
