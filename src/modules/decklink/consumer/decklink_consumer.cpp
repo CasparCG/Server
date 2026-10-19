@@ -40,6 +40,7 @@
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
 #include <common/executor.h>
+#include <common/scope_exit.h>
 #include <common/timer.h>
 
 #include <tbb/parallel_for.h>
@@ -467,6 +468,107 @@ class decklink_frame
     }
 };
 
+// Registered with the driver in place of the consumer and never freed: the SDK documents no fence for
+// SetScheduledFrameCompletionCallback(nullptr), so a late dispatch must still land on a live object.
+class output_callback_shim final : public IDeckLinkVideoOutputCallback
+{
+    std::mutex                    mutex_;
+    std::condition_variable       drained_;
+    IDeckLinkVideoOutputCallback* target_    = nullptr;
+    int                           in_flight_ = 0;
+
+    struct leave_guard
+    {
+        output_callback_shim* shim;
+
+        ~leave_guard() noexcept
+        {
+            {
+                std::lock_guard<std::mutex> lock(shim->mutex_);
+                --shim->in_flight_;
+            }
+            shim->drained_.notify_all();
+        }
+    };
+
+    template <typename F>
+    HRESULT dispatch(F&& fn)
+    {
+        IDeckLinkVideoOutputCallback* target;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (target_ == nullptr)
+                return S_OK;
+            target = target_;
+            ++in_flight_;
+        }
+
+        leave_guard leave{this};
+        return fn(target);
+    }
+
+  public:
+    explicit output_callback_shim(IDeckLinkVideoOutputCallback* target)
+        : target_(target)
+    {
+    }
+
+    output_callback_shim(const output_callback_shim&)            = delete;
+    output_callback_shim& operator=(const output_callback_shim&) = delete;
+
+    // Bounded normally: this runs with the channel blocked, so a callback that never returns must
+    // cost one device rather than the channel. Unbounded while a constructor unwinds, where the
+    // caller has no object left to leak and returning would destroy the target underneath it.
+    [[nodiscard]] bool detach(bool bounded)
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        target_ = nullptr;
+        if (!bounded) {
+            drained_.wait(lock, [&] { return in_flight_ == 0; });
+            return true;
+        }
+        return drained_.wait_for(lock, std::chrono::seconds(2), [&] { return in_flight_ == 0; });
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID, LPVOID*) override { return E_NOINTERFACE; }
+    ULONG STDMETHODCALLTYPE   AddRef() override { return 1; }
+    ULONG STDMETHODCALLTYPE   Release() override { return 1; }
+
+    HRESULT STDMETHODCALLTYPE ScheduledFrameCompleted(IDeckLinkVideoFrame*           completed_frame,
+                                                      BMDOutputFrameCompletionResult result) override
+    {
+        return dispatch([&](IDeckLinkVideoOutputCallback* target) {
+            return target->ScheduledFrameCompleted(completed_frame, result);
+        });
+    }
+
+    HRESULT STDMETHODCALLTYPE ScheduledPlaybackHasStopped() override
+    {
+        return dispatch([](IDeckLinkVideoOutputCallback* target) { return target->ScheduledPlaybackHasStopped(); });
+    }
+};
+
+class output_callback_handle
+{
+    output_callback_shim* shim_;
+
+  public:
+    explicit output_callback_handle(IDeckLinkVideoOutputCallback* target)
+        : shim_(new output_callback_shim(target))
+    {
+    }
+
+    output_callback_handle(const output_callback_handle&)            = delete;
+    output_callback_handle& operator=(const output_callback_handle&) = delete;
+
+    // Deliberately does not free the shim; only the dispatch to the target is stopped.
+    ~output_callback_handle() { static_cast<void>(shim_->detach(true)); }
+
+    [[nodiscard]] IDeckLinkVideoOutputCallback* get() const { return shim_; }
+
+    [[nodiscard]] bool detach(bool bounded) { return shim_->detach(bounded); }
+};
+
 struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
 {
     const configuration                       config_;
@@ -480,6 +582,10 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
     int                                       device_sync_group_;
     std::optional<core::const_frame>          first_field_;
 
+    std::mutex              playback_stopped_mutex_;
+    std::condition_variable playback_stopped_cond_;
+    bool                    playback_stopped_ = true;
+
     const std::wstring model_name_ = get_model_name(decklink_);
 
     // long long video_scheduled_ = 0;
@@ -490,6 +596,10 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
                                                            decklink_format_desc_.format,
                                                            format_strategy_->get_pixel_format(),
                                                            bmdSupportedVideoModeDefault);
+
+    bool                   shutdown_ = false;
+    bool                   drained_  = false;
+    output_callback_handle callback_{this};
 
     decklink_secondary_port(const configuration&           config,
                             port_configuration             output_config,
@@ -527,21 +637,57 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
             CASPAR_LOG(trace) << print << L" Joined sync group " << device_sync_group;
         }
 
-        if (FAILED(output_->SetScheduledFrameCompletionCallback(this)))
+        if (FAILED(output_->SetScheduledFrameCompletionCallback(callback_.get())))
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info(print + L" Failed to set key playback completion callback.")
                                    << boost::errinfo_api_function("SetScheduledFrameCompletionCallback"));
     }
 
-    ~decklink_secondary_port()
+    // False means a driver callback is still inside this object; the caller must not destroy it.
+    [[nodiscard]] bool shutdown(bool bounded = true)
     {
+        if (std::exchange(shutdown_, true))
+            return drained_;
+
+        drained_ = true;
+
         if (output_) {
             if (device_sync_group_ == 0) {
-                output_->StopScheduledPlayback(0, nullptr, 0);
+                BOOL running = TRUE;
+                if (FAILED(output_->IsScheduledPlaybackRunning(&running)))
+                    running = TRUE;
+
+                if (running) {
+                    if (FAILED(output_->StopScheduledPlayback(0, nullptr, 0)))
+                        CASPAR_LOG(warning) << print() << L" Failed to stop scheduled playback.";
+
+                    std::unique_lock<std::mutex> lock(playback_stopped_mutex_);
+                    if (!playback_stopped_cond_.wait_for(
+                            lock, std::chrono::seconds(2), [&] { return playback_stopped_; }))
+                        CASPAR_LOG(warning) << print() << L" Timed out waiting for scheduled playback to stop.";
+                }
+            }
+
+            // Unconditional: a sync-group port is stopped by the primary but has its own callback registration.
+            drained_ = callback_.detach(bounded);
+            if (!drained_) {
+                CASPAR_LOG(error) << print() << L" Output callback did not return; leaving this device open.";
+                return false;
             }
 
             output_->DisableVideoOutput();
+
+            if (FAILED(output_->SetScheduledFrameCompletionCallback(nullptr)))
+                CASPAR_LOG(warning) << print() << L" Failed to unregister playback completion callback.";
         }
+
+        return drained_;
+    }
+
+    ~decklink_secondary_port()
+    {
+        if (!shutdown())
+            CASPAR_LOG(error) << print() << L" Destroyed while an output callback was still running.";
     }
 
     [[nodiscard]] std::wstring print() const
@@ -564,6 +710,10 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
     void start_playback(const Print& print)
     {
         if (device_sync_group_ == 0) {
+            {
+                std::lock_guard<std::mutex> lock(playback_stopped_mutex_);
+                playback_stopped_ = false;
+            }
             if (FAILED(output_->StartScheduledPlayback(0, decklink_format_desc_.time_scale, 1.0))) {
                 CASPAR_THROW_EXCEPTION(caspar_exception()
                                        << msg_info(print() + L" Failed to schedule secondary playback."));
@@ -623,7 +773,15 @@ struct decklink_secondary_port final : public IDeckLinkVideoOutputCallback
     ULONG STDMETHODCALLTYPE   AddRef() override { return 1; }
     ULONG STDMETHODCALLTYPE   Release() override { return 1; }
 
-    HRESULT STDMETHODCALLTYPE ScheduledPlaybackHasStopped() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE ScheduledPlaybackHasStopped() override
+    {
+        {
+            std::lock_guard<std::mutex> lock(playback_stopped_mutex_);
+            playback_stopped_ = true;
+        }
+        playback_stopped_cond_.notify_all();
+        return S_OK;
+    }
 
     HRESULT STDMETHODCALLTYPE ScheduledFrameCompleted(IDeckLinkVideoFrame*           completed_frame,
                                                       BMDOutputFrameCompletionResult result) override
@@ -680,6 +838,14 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
     std::atomic<bool>              abort_request_{false};
     std::shared_ptr<decklink_vanc> vanc_;
 
+    std::mutex              playback_stopped_mutex_;
+    std::condition_variable playback_stopped_cond_;
+    bool                    playback_stopped_ = true;
+
+    bool                   shutdown_ = false;
+    bool                   drained_  = false;
+    output_callback_handle callback_{this};
+
   public:
     decklink_consumer(const configuration& config, core::video_format_desc channel_format_desc, int channel_index)
         : channel_index_(channel_index)
@@ -688,6 +854,14 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         , channel_format_desc_(std::move(channel_format_desc))
         , decklink_format_desc_(get_decklink_format(config.primary, channel_format_desc_))
     {
+        // On a throw, drain the driver callback before any member is destroyed.
+        bool constructed = false;
+        CASPAR_SCOPE_EXIT
+        {
+            if (!constructed)
+                static_cast<void>(shutdown(false));
+        };
+
         graph_->set_color("tick-time", diagnostics::color(0.0f, 0.6f, 0.9f));
         graph_->set_color("late-frame", diagnostics::color(0.6f, 0.3f, 0.3f));
         graph_->set_color("dropped-frame", diagnostics::color(0.3f, 0.6f, 0.3f));
@@ -793,22 +967,72 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
         wait_for_reference_lock();
 
         start_playback();
+
+        constructed = true;
     }
 
-    ~decklink_consumer()
+    // False means a driver callback is still inside this object or a secondary port; do not destroy it.
+    [[nodiscard]] bool shutdown(bool bounded = true)
     {
-        abort_request_ = true;
+        if (std::exchange(shutdown_, true))
+            return drained_;
+
+        drained_ = true;
+
+        {
+            // Under the waiters' mutex: an atomic store plus notify can be missed between pop()'s
+            // predicate check and its wait, and the drain below would then never finish.
+            std::lock_guard<std::mutex> lock(buffer_mutex_);
+            abort_request_ = true;
+        }
         buffer_cond_.notify_all();
 
         if (output_ != nullptr) {
-            output_->StopScheduledPlayback(0, nullptr, 0);
+            BOOL running = TRUE;
+            if (FAILED(output_->IsScheduledPlaybackRunning(&running)))
+                running = TRUE;
+
+            if (running) {
+                if (FAILED(output_->StopScheduledPlayback(0, nullptr, 0)))
+                    CASPAR_LOG(warning) << print() << L" Failed to stop scheduled playback.";
+
+                // Scoped: held across detach() this would deadlock an in-flight ScheduledPlaybackHasStopped.
+                std::unique_lock<std::mutex> lock(playback_stopped_mutex_);
+                if (!playback_stopped_cond_.wait_for(lock, std::chrono::seconds(2), [&] { return playback_stopped_; }))
+                    CASPAR_LOG(warning) << print() << L" Timed out waiting for scheduled playback to stop.";
+            }
+
+            // Must precede the disables and the secondary ports: an in-flight callback uses both.
+            drained_ = callback_.detach(bounded);
+            if (!drained_) {
+                CASPAR_LOG(error) << print() << L" Output callback did not return; leaving this device open.";
+                return false;
+            }
+
             if (config_.embedded_audio) {
                 output_->DisableAudioOutput();
             }
             output_->DisableVideoOutput();
+
+            if (FAILED(output_->SetScheduledFrameCompletionCallback(nullptr)))
+                CASPAR_LOG(warning) << print() << L" Failed to unregister playback completion callback.";
         }
 
+        for (auto& context : secondary_port_contexts_)
+            drained_ = context->shutdown(bounded) && drained_;
+
+        if (!drained_)
+            return false;
+
         secondary_port_contexts_.clear();
+
+        return true;
+    }
+
+    ~decklink_consumer()
+    {
+        if (!shutdown())
+            CASPAR_LOG(error) << print() << L" Destroyed while an output callback was still running.";
     }
 
     void wait_for_reference_lock()
@@ -880,7 +1104,7 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
                                    << msg_info(print() + L" Could not enable primary video output."));
         }
 
-        if (FAILED(output_->SetScheduledFrameCompletionCallback(this))) {
+        if (FAILED(output_->SetScheduledFrameCompletionCallback(callback_.get()))) {
             CASPAR_THROW_EXCEPTION(caspar_exception()
                                    << msg_info(print() + L" Failed to set primary playback completion callback.")
                                    << boost::errinfo_api_function("SetScheduledFrameCompletionCallback"));
@@ -893,6 +1117,10 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
     void start_playback()
     {
+        {
+            std::lock_guard<std::mutex> lock(playback_stopped_mutex_);
+            playback_stopped_ = false;
+        }
         if (FAILED(output_->StartScheduledPlayback(0, decklink_format_desc_.time_scale, 1.0))) {
             CASPAR_THROW_EXCEPTION(caspar_exception() << msg_info(print() + L" Failed to schedule primary playback."));
         }
@@ -908,6 +1136,11 @@ struct decklink_consumer final : public IDeckLinkVideoOutputCallback
 
     HRESULT STDMETHODCALLTYPE ScheduledPlaybackHasStopped() override
     {
+        {
+            std::lock_guard<std::mutex> lock(playback_stopped_mutex_);
+            playback_stopped_ = true;
+        }
+        playback_stopped_cond_.notify_all();
         CASPAR_LOG(info) << print() << L" Scheduled playback has stopped.";
         return S_OK;
     }
@@ -1178,11 +1411,23 @@ struct decklink_consumer_proxy : public core::frame_consumer
         executor_.begin_invoke([=] { com_initialize(); });
     }
 
+    void destroy_consumer()
+    {
+        if (!consumer_)
+            return;
+
+        // Leak rather than free memory a driver callback may still be executing inside.
+        if (consumer_->shutdown())
+            consumer_.reset();
+        else
+            static_cast<void>(consumer_.release());
+    }
+
     ~decklink_consumer_proxy() override
     {
         executor_.invoke([=, this] {
             set_thread_realtime_priority();
-            consumer_.reset();
+            destroy_consumer();
             com_uninitialize();
         });
     }
@@ -1193,7 +1438,7 @@ struct decklink_consumer_proxy : public core::frame_consumer
     {
         format_desc_ = format_desc;
         executor_.invoke([=, this] {
-            consumer_.reset();
+            destroy_consumer();
             consumer_ = std::make_unique<decklink_consumer>(config_, format_desc, channel_info.index);
         });
     }
