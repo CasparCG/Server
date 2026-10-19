@@ -8,6 +8,19 @@ uniform sampler2D	plane[4];
 uniform sampler2D	local_key;
 uniform sampler2D	layer_key;
 
+// 3D LUT (creative look)
+uniform sampler3D	lut3d_tex;
+uniform bool		lut3d_enable;
+uniform float		lut3d_strength;
+
+// Tone curves (per-channel + master, 256-entry LUT packed as RGBA32F 256x1)
+uniform sampler2D	curve_lut_tex;
+uniform bool		curves_enable;
+
+// Hue-vs-Hue / Hue-vs-Sat / Hue-vs-Lum / Sat-vs-Sat curves (256x1 RGBA32F)
+uniform sampler2D	hue_curve_tex;
+uniform bool		hue_curve_enable;
+
 uniform bool        is_straight_alpha;
 
 uniform mat3		color_matrix;
@@ -664,6 +677,82 @@ vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
     return c;
 }
 
+// ---- 3D LUT ----
+// Trilinear lookup in a 3D texture. Working colour is BGR, so swizzle to RGB
+// for the lookup and back. Input clamped to the LUT's 0..1 domain.
+// Entry k of an N-cube describes input k/(N-1) and lives at texel centre (k+0.5)/N,
+// so the colour has to be rescaled before it is used as a coordinate. Passing it
+// straight in puts value v at texel position v*N - 0.5 instead of v*(N-1): correct
+// only at v = 0.5 and off by up to half a texel at the ends. Measured with an
+// identity cube, where a correct LUT returns its input unchanged, that is up to 7 LSB
+// on a 17-cube and 4 on a 33-cube. textureSize() rather than a uniform, so the value
+// cannot go stale when the LUT is swapped.
+vec3 apply_lut3d(vec3 c, float strength)
+{
+    float n      = float(textureSize(lut3d_tex, 0).x);
+    vec3 rgb_in  = clamp(c.bgr, 0.0, 1.0);
+    rgb_in       = (rgb_in * (n - 1.0) + 0.5) / n;
+    vec3 rgb_out = texture(lut3d_tex, rgb_in).rgb;
+    return mix(c, rgb_out.bgr, strength);
+}
+
+// ---- Tone Curves: bilinear sample of a 256-entry float LUT ----
+// ch: 0=R slot, 1=G slot, 2=B slot, 3=Master. The kernel packs the LUT so the
+// .r slot holds the displayed-Blue curve and .b slot the displayed-Red curve.
+float sample_lut_256(float val, int ch)
+{
+    float s  = clamp(val, 0.0, 1.0) * 255.0;
+    int   lo = int(s);
+    int   hi = min(lo + 1, 255);
+    float f  = fract(s);
+    vec4 lo4 = texelFetch(curve_lut_tex, ivec2(lo, 0), 0);
+    vec4 hi4 = texelFetch(curve_lut_tex, ivec2(hi, 0), 0);
+    vec4 v4  = mix(lo4, hi4, f);
+    if (ch == 0) return v4.r;
+    if (ch == 1) return v4.g;
+    if (ch == 2) return v4.b;
+    return v4.a;
+}
+
+vec3 apply_curves(vec3 c)
+{
+    // Per-channel curves first, then the master curve as a global tone.
+    c.r = sample_lut_256(c.r, 0);
+    c.g = sample_lut_256(c.g, 1);
+    c.b = sample_lut_256(c.b, 2);
+    c.r = sample_lut_256(c.r, 3);
+    c.g = sample_lut_256(c.g, 3);
+    c.b = sample_lut_256(c.b, 3);
+    return c;
+}
+
+// ---- Hue-vs-Hue / Hue-vs-Sat / Hue-vs-Lum / Sat-vs-Sat curves ----
+// 4-channel LUT indexed by hue: R=hue offset, G=sat multiplier, B=lum offset,
+// A=sat-vs-sat multiplier (indexed by saturation).
+vec3 apply_hue_curves(vec3 c)
+{
+    // `c` is BGR-ordered at this point: get_rgba_color() swizzles to .bgra on
+    // the way in and main() writes fragColor = color.bgra on the way out, so the
+    // two cancel for a straight pass-through but everything in between sees blue
+    // in the red slot. rgb2hsv treats the first component as red regardless, and
+    // exchanging red and blue mirrors the hue wheel, so an unswizzled call here
+    // delivers the negation of the requested offset -- +0.25 comes out as -0.25.
+    // Only 0.0 and 0.5 look right, being their own negations.
+    //
+    // ContrastSaturationBrightness already accounts for this ordering with
+    // luma_coeff.bgr; this does the same. Saturation and value are unchanged by
+    // the exchange, so only hue-vs-hue was affected.
+    vec3 hsv     = rgb2hsv(clamp(c.bgr, 0.0, 1.0));
+    vec4 offsets = texture(hue_curve_tex, vec2(hsv.x, 0.5));
+    hsv.x = fract(hsv.x + offsets.r);
+    hsv.y *= offsets.g;
+    vec4 sat_offsets = texture(hue_curve_tex, vec2(hsv.y, 0.5));
+    hsv.y *= sat_offsets.a;
+    vec3 result = hsv2rgb(hsv).bgr;
+    result += offsets.b;
+    return result;
+}
+
 void main()
 {
     vec4 color = get_rgba_color();
@@ -675,17 +764,23 @@ void main()
     // here -- see the channel-order note above the grading functions.
     if (cdl_enable)
         color.rgb = apply_cdl(color.rgb, cdl_slope.bgr, cdl_offset.bgr, cdl_power.bgr, cdl_saturation);
+    if (lut3d_enable)
+        color.rgb = apply_lut3d(color.rgb, lut3d_strength);
     if (white_balance)
         color.rgb = apply_white_balance(color.rgb, wb_temperature, wb_tint);
     if (lmg_enable)
         color.rgb = apply_lmg(color.rgb, lmg_lift.bgr, lmg_midtone.bgr, lmg_gain.bgr);
     if (hue_shift_enable)
         color.rgb = apply_hue_shift(color.rgb, hue_shift_degrees);
+    if (hue_curve_enable)
+        color.rgb = apply_hue_curves(color.rgb);
     if (tonebalance_enable)
         color.rgb = apply_tone_balance(color.rgb, tb_shadows, tb_highlights);
     if (split_tone_enable)
         color.rgb =
             apply_split_tone(color.rgb, split_shadow_color.bgr, split_highlight_color.bgr, split_balance);
+    if (curves_enable)
+        color.rgb = apply_curves(color.rgb);
     if(levels)
         color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
     if(csb)

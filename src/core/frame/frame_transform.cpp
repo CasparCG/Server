@@ -132,6 +132,14 @@ image_transform image_transform::tween(double                 time,
         result.cdl_power[i]  = do_tween(time, source.cdl_power[i], dest.cdl_power[i], duration, tween);
     }
     result.cdl_saturation = do_tween(time, source.cdl_saturation, dest.cdl_saturation, duration, tween);
+    result.lut3d          = dest.lut3d; // snap to destination (cannot interpolate LUT data)
+    result.lut3d_strength = static_cast<float>(do_tween(time,
+                                                        static_cast<double>(source.lut3d_strength),
+                                                        static_cast<double>(dest.lut3d_strength),
+                                                        duration,
+                                                        tween));
+    result.curves         = dest.curves; // snap to destination (control-point sets cannot interpolate)
+    result.hue_curves     = dest.hue_curves; // snap to destination
 
     do_tween_rectangle(source.crop, dest.crop, result.crop, time, duration, tween);
     do_tween_corners(source.perspective, dest.perspective, result.perspective, time, duration, tween);
@@ -180,7 +188,23 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                boost::range::equal(lhs.cdl_slope, rhs.cdl_slope, eq) &&
                boost::range::equal(lhs.cdl_offset, rhs.cdl_offset, eq) &&
                boost::range::equal(lhs.cdl_power, rhs.cdl_power, eq) &&
-               eq(lhs.cdl_saturation, rhs.cdl_saturation) ||
+               eq(lhs.cdl_saturation, rhs.cdl_saturation) &&
+               lhs.lut3d.get() == rhs.lut3d.get() &&
+               eq(static_cast<double>(lhs.lut3d_strength), static_cast<double>(rhs.lut3d_strength)) &&
+               lhs.hue_curves.get() == rhs.hue_curves.get() && lhs.curves.enable == rhs.curves.enable &&
+               [&]() {
+                   auto cc_eq = [](const core::curve_channel& a, const core::curve_channel& b) {
+                       if (a.count != b.count)
+                           return false;
+                       for (int i = 0; i < a.count; ++i)
+                           if (std::abs(a.points[i].x - b.points[i].x) >= 5e-8 ||
+                               std::abs(a.points[i].y - b.points[i].y) >= 5e-8)
+                               return false;
+                       return true;
+                   };
+                   return cc_eq(lhs.curves.master, rhs.curves.master) && cc_eq(lhs.curves.red, rhs.curves.red) &&
+                          cc_eq(lhs.curves.green, rhs.curves.green) && cc_eq(lhs.curves.blue, rhs.curves.blue);
+               }() ||
            lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 

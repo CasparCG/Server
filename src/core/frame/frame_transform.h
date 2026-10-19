@@ -26,9 +26,47 @@
 #include <core/mixer/image/blend_modes.h>
 
 #include <array>
+#include <memory>
 #include <optional>
+#include <vector>
 
 namespace caspar { namespace core {
+
+// 3D LUT data (parsed from .cube files).
+struct lut3d_data final
+{
+    int                size = 0; // LUT dimension (e.g. 33 for a 33x33x33 LUT)
+    std::vector<float> data;      // size*size*size*3 RGB float values
+};
+
+// Tone curve control points (per-channel + master, up to 16 points each).
+struct curve_point final
+{
+    double x = 0.0;
+    double y = 0.0;
+};
+
+// count == 0 means "identity" (the LUT builder returns a linear ramp).
+struct curve_channel final
+{
+    int                         count = 0;
+    std::array<curve_point, 16> points{};
+};
+
+struct tone_curves final
+{
+    bool          enable = false;
+    curve_channel master; // applied as a global tone after per-channel curves
+    curve_channel red;
+    curve_channel green;
+    curve_channel blue;
+};
+
+// Hue-curve data (Hue-vs-Hue, Hue-vs-Sat, Hue-vs-Lum, Sat-vs-Sat).
+struct hue_curve_data final
+{
+    std::vector<float> data; // 256*4 floats (R=HvH, G=HvS, B=HvL, A=SvS)
+};
 
 struct chroma
 {
@@ -125,6 +163,14 @@ inline constexpr grade_range cdl_offset{-1.0, 1.0};
 inline constexpr grade_range cdl_power{0.01, 10.0};
 inline constexpr grade_range cdl_saturation{0.0, 10.0};
 
+/// Curve control points are normalised on both axes.
+inline constexpr grade_range lut3d_strength{0.0, 1.0};
+inline constexpr grade_range curve_coord{0.0, 1.0};
+/// HUE_HUE and HUE_LUM are signed offsets (neutral 0); HUE_SAT and SAT_SAT are
+/// multipliers (neutral 1). Chosen by the curve the command names.
+inline constexpr grade_range hue_curve_offset{-1.0, 1.0};
+inline constexpr grade_range hue_curve_scale{0.0, 4.0};
+
 } // namespace grade_limits
 
 struct image_transform final
@@ -165,6 +211,10 @@ struct image_transform final
     std::array<double, 3> cdl_offset     = {0.0, 0.0, 0.0}; // ASC CDL offset
     std::array<double, 3> cdl_power      = {1.0, 1.0, 1.0}; // ASC CDL power
     double                cdl_saturation = 1.0;             // ASC CDL saturation
+    std::shared_ptr<const lut3d_data> lut3d;                // nullptr = disabled
+    float                             lut3d_strength = 1.0f; // 0..1 mix factor
+    core::tone_curves                 curves;               // per-channel + master tone curves
+    std::shared_ptr<const hue_curve_data> hue_curves;       // nullptr = disabled
 
     bool             is_key      = false;
     bool             invert      = false;

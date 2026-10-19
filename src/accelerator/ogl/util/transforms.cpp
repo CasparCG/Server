@@ -140,6 +140,21 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.cdl_power[i]  = lim::cdl_power.clamp(self.cdl_power[i] * other.cdl_power[i]);
     }
     self.cdl_saturation = lim::cdl_saturation.clamp(self.cdl_saturation * other.cdl_saturation);
+    // 3D LUT
+    if (other.lut3d) {
+        self.lut3d          = other.lut3d;
+        self.lut3d_strength = other.lut3d_strength;
+    }
+
+    // Tone curves: override when enabled (curves don't compose additively)
+    if (other.curves.enable) {
+        self.curves = other.curves;
+    }
+
+    // Hue curves
+    if (other.hue_curves) {
+        self.hue_curves = other.hue_curves;
+    }
 }
 
 bool is_default_perspective(const core::corners& perspective)
