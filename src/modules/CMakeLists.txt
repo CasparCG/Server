@@ -9,6 +9,10 @@ add_subdirectory(screen)
 add_subdirectory(newtek)
 add_subdirectory(artnet)
 
+if (ENABLE_PROAUDIO AND PORTAUDIO_FOUND)
+	add_subdirectory(proaudio)
+endif ()
+
 if (ENABLE_HTML)
 	add_subdirectory(html)
 endif ()

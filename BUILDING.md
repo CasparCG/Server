@@ -92,6 +92,15 @@ If all goes to plan, a folder called 'staging' has been created with everything 
 
 -DENABLE_HTML=OFF - useful if you lack CEF, and would like to build without that module.
 
+-DENABLE_PROAUDIO=ON - enable the optional PortAudio multi-channel audio consumer (default OFF).
+On Linux, install the PortAudio development package (`portaudio19-dev` on Ubuntu).
+Windows builds fetch PortAudio automatically; optionally set `-DPROAUDIO_ASIO_SDK_PATH`
+to a locally obtained ASIO SDK root to enable ASIO.
+
+The proaudio `BUFFER_SIZE` / `buffer-size` setting is clamped to 16..65536 frames when
+positive; otherwise the driver chooses the size. Initialization failures or stalled
+audio callbacks remove the consumer so the channel can fall back to another clock.
+
 -DUSE_STATIC_BOOST=ON - (Linux only, default OFF) statically link against Boost.
 
 -DUSE_SYSTEM_CEF=OFF - (Linux only, default ON) use the version of CEF from your OS. This expects to be using builds from https://launchpad.net/~casparcg/+archive/ubuntu/ppa

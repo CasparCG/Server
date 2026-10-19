@@ -17,6 +17,7 @@ set(USE_SYSTEM_CEF ON CACHE BOOL "Use the version of cef from your OS (only test
 set(CASPARCG_BINARY_NAME "casparcg" CACHE STRING "Custom name of the binary to build (this disables some install files)")
 set(ENABLE_AVX2 OFF CACHE BOOL "Enable the AVX2 instruction set (requires a CPU that supports it)")
 set(ENABLE_VULKAN OFF CACHE BOOL "Enable Vulkan support")
+set(ENABLE_PROAUDIO OFF CACHE BOOL "Enable the PortAudio-based multi-channel pro-audio consumer (ALSA/JACK)")
 
 # Determine build (target) platform
 SET (PLATFORM_FOLDER_NAME "linux")
@@ -41,6 +42,14 @@ find_package(SFML 3 COMPONENTS Graphics System Window QUIET)
 if(NOT SFML_FOUND)
     find_package(SFML 2 COMPONENTS graphics system window REQUIRED)
 endif()
+
+# PortAudio has no upstream CMake config package, only pkg-config.
+# The proaudio module is skipped entirely (see modules/CMakeLists.txt) if this isn't found.
+if (ENABLE_PROAUDIO)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PORTAUDIO REQUIRED IMPORTED_TARGET portaudio-2.0)
+    add_library(PortAudio::PortAudio ALIAS PkgConfig::PORTAUDIO)
+endif ()
 
 IF (ENABLE_VULKAN)
     find_package(Vulkan REQUIRED)
