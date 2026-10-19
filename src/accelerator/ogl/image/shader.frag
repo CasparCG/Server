@@ -485,6 +485,19 @@ vec4 ycbcra_to_rgba(float Y, float Cb, float Cr, float A)
     return vec4(color_matrix * YCbCr / 255, A).bgra;
 }
 
+// Horizontal chroma in 4:2:2 and 4:2:0 is co-sited (ITU-R BT.601 / BT.709): chroma sample k
+// shares its position with luma 2k. Sampling a half-width plane at the luma coordinate lands
+// on chroma texel (x + 0.5) / 2, a quarter texel off centre; co-siting needs (x + 1) / 2, so
+// the horizontal coordinate gains half a luma pixel. The vertical coordinate is left alone:
+// 4:2:0 chroma is centred vertically, which sampling at the luma centre already gives. The
+// width ratio makes this a no-op for planes that are not subsampled.
+vec2 chroma_coords(sampler2D luma, sampler2D chroma, vec2 coords)
+{
+    float luma_width   = float(textureSize(luma, 0).x);
+    float chroma_width = float(textureSize(chroma, 0).x);
+    return vec2(coords.x + (luma_width / chroma_width - 1.0) * 0.5 / luma_width, coords.y);
+}
+
 vec4 get_sample(sampler2D sampler, vec2 coords)
 {
     return texture(sampler, coords);
@@ -506,16 +519,18 @@ vec4 get_rgba_color()
         return get_sample(plane[0], TexCoord.st / TexCoord.q).gbar * precision_factor[0];
     case 5:		//ycbcr,
         {
+            vec2  chroma = chroma_coords(plane[0], plane[1], TexCoord.st / TexCoord.q);
             float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float cb = get_sample(plane[1], chroma).r * precision_factor[1];
+            float cr = get_sample(plane[2], chroma).r * precision_factor[2];
             return ycbcra_to_rgba(y, cb, cr, 1.0);
         }
     case 6:		//ycbcra
         {
+            vec2  chroma = chroma_coords(plane[0], plane[1], TexCoord.st / TexCoord.q);
             float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float cb = get_sample(plane[1], chroma).r * precision_factor[1];
+            float cr = get_sample(plane[2], chroma).r * precision_factor[2];
             float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
             return ycbcra_to_rgba(y, cb, cr, a);
         }
@@ -530,9 +545,10 @@ vec4 get_rgba_color()
         return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rgb * precision_factor[0], 1.0);
 	case 10:	// uyvy
 		{
+			vec2 chroma = chroma_coords(plane[0], plane[1], TexCoord.st / TexCoord.q);
 			float y = get_sample(plane[0], TexCoord.st / TexCoord.q).g * precision_factor[0];
-			float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).b * precision_factor[1];
-			float cr = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
+			float cb = get_sample(plane[1], chroma).b * precision_factor[1];
+			float cr = get_sample(plane[1], chroma).r * precision_factor[1];
 			return ycbcra_to_rgba(y, cb, cr, 1.0);
 		}
     case 11:    // gbrp
