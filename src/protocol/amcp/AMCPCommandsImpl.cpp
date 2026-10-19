@@ -1744,6 +1744,15 @@ std::wstring mixer_clear_command(command_context& ctx)
     return L"202 MIXER OK\r\n";
 }
 
+std::wstring mixer_clear_all_command(command_context& ctx)
+{
+    for (auto& ch : *ctx.channels) {
+        ch.stage->clear_transforms();
+    }
+
+    return L"202 MIXER OK\r\n";
+}
+
 std::wstring channel_grid_command(command_context& ctx)
 {
     int   index = 1;
@@ -2165,6 +2174,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRID", mixer_grid_command, 1);
     repo->register_channel_command(L"Mixer Commands", L"MIXER COMMIT", mixer_commit_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CLEAR", mixer_clear_command, 0);
+    repo->register_command(L"Mixer Commands", L"MIXER CLEARALL", mixer_clear_all_command, 0);
     repo->register_command(L"Mixer Commands", L"CHANNEL_GRID", channel_grid_command, 0);
 
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL LIST", thumbnail_list_command, 0);
