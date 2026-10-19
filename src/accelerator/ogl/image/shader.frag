@@ -77,6 +77,16 @@ uniform vec3		cdl_slope;
 uniform vec3		cdl_offset;
 uniform vec3		cdl_power;
 uniform float		cdl_saturation;
+// Color Grading (ACES color management)
+uniform bool  color_grading;
+uniform int   input_transfer;    // 0=linear,1=srgb,2=rec709,3=pq,4=hlg,5=logc3,6=slog3
+uniform int   output_transfer;
+uniform mat3  input_to_working;  // input gamut -> working space (ACEScg / AP1)
+uniform mat3  working_to_output; // working space (ACEScg / AP1) -> output gamut
+uniform int   tone_mapping_op;   // 0=none,1=reinhard,2=aces_filmic,3=aces_rrt,4=rrt_709,5=rrt_p3,6=rrt_2020_pq,7=hlg_ootf
+uniform float exposure;          // linear exposure multiplier
+uniform float luminance_scale;   // BT.2408 luminance adaptation across HDR/SDR domains
+uniform float display_peak_luminance; // display nominal peak luminance in nits
 
 /*
 ** Contrast, saturation, brightness
@@ -664,6 +674,223 @@ vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
     return c;
 }
 
+// ---- Color Grading: EOTFs (encoded -> linear) ----
+float eotf_srgb(float x)   { return x <= 0.04045  ? x / 12.92 : pow((x + 0.055) / 1.055, 2.4); }
+float eotf_rec709(float x) { return pow(max(x, 0.0), 2.4); }  // BT.1886 display EOTF
+float eotf_pq(float x) {
+    const float m1 = 0.1593017578125, m2 = 78.84375;
+    const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    float xp = pow(max(x, 0.0), 1.0 / m2);
+    return pow(max(xp - c1, 0.0) / (c2 - c3 * xp), 1.0 / m1);
+}
+float eotf_hlg(float x) {
+    const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
+    return x <= 0.5 ? (x * x) / 3.0 : (exp((x - c) / a) + b) / 12.0;
+}
+float eotf_logc3(float x) {
+    const float a = 5.555556, b = 0.052272, c = 0.247190, d = 0.385537, e = 5.367655, f = 0.092809;
+    return x > e * 0.010591 + f ? (pow(10.0, (x - d) / c) - b) / a : (x - f) / e;
+}
+float eotf_slog3(float x) {
+    const float cut = 171.2102946929 / 1023.0;
+    return x >= cut ? pow(10.0, (x - 0.410557184750733) / 0.341132524981570) * 0.18 + 0.01
+                    : (x - 95.0 / 1023.0) * 0.01 / (cut - 95.0 / 1023.0);
+}
+float eotf_gamma24(float x) { return pow(max(x, 0.0), 2.4); }  // Pure gamma 2.4 inverse
+float eotf_gamma26(float x) { return pow(max(x, 0.0), 2.6); }  // Pure gamma 2.6 inverse
+vec3 apply_eotf(vec3 rgb, int t) {
+    switch (t) {
+        case 1: return vec3(eotf_srgb(rgb.r),  eotf_srgb(rgb.g),  eotf_srgb(rgb.b));
+        case 2: return vec3(eotf_rec709(rgb.r), eotf_rec709(rgb.g), eotf_rec709(rgb.b));
+        case 3: return vec3(eotf_pq(rgb.r),    eotf_pq(rgb.g),    eotf_pq(rgb.b));
+        case 4: return vec3(eotf_hlg(rgb.r),   eotf_hlg(rgb.g),   eotf_hlg(rgb.b));
+        case 5: return vec3(eotf_logc3(rgb.r), eotf_logc3(rgb.g), eotf_logc3(rgb.b));
+        case 6: return vec3(eotf_slog3(rgb.r), eotf_slog3(rgb.g), eotf_slog3(rgb.b));
+        case 7: return rgb;  // linear (no EOTF needed)
+        case 8: return vec3(eotf_gamma24(rgb.r), eotf_gamma24(rgb.g), eotf_gamma24(rgb.b));
+        case 9: return vec3(eotf_gamma26(rgb.r), eotf_gamma26(rgb.g), eotf_gamma26(rgb.b));
+        default: return rgb;
+    }
+}
+// ---- Color Grading: OETFs (linear -> encoded) ----
+float oetf_srgb(float x)   { return x <= 0.0031308 ? x * 12.92 : 1.055 * pow(max(x, 0.0), 1.0 / 2.4) - 0.055; }
+float oetf_rec709(float x) { return pow(max(x, 0.0), 1.0 / 2.4); }  // BT.1886 inverse
+float oetf_pq(float x) {
+    const float m1 = 0.1593017578125, m2 = 78.84375;
+    const float c1 = 0.8359375, c2 = 18.8515625, c3 = 18.6875;
+    float xn = pow(clamp(x, 0.0, 1.0), m1);
+    return pow((c1 + c2 * xn) / (1.0 + c3 * xn), m2);
+}
+float oetf_hlg(float x) {
+    const float a = 0.17883277, b = 0.28466892, c = 0.55991073;
+    x = max(x, 0.0);
+    return x <= 1.0 / 12.0 ? sqrt(3.0 * x) : a * log(12.0 * x - b) + c;
+}
+float oetf_gamma24(float x) { return pow(max(x, 0.0), 1.0 / 2.4); }  // Pure gamma 2.4 (EBU)
+float oetf_gamma26(float x) { return pow(max(x, 0.0), 1.0 / 2.6); }  // Pure gamma 2.6 (DCI)
+vec3 apply_oetf(vec3 rgb, int t) {
+    rgb = max(rgb, vec3(0.0));
+    switch (t) {
+        case 1: return vec3(oetf_srgb(rgb.r),  oetf_srgb(rgb.g),  oetf_srgb(rgb.b));
+        case 2: return vec3(oetf_rec709(rgb.r), oetf_rec709(rgb.g), oetf_rec709(rgb.b));
+        case 3: return vec3(oetf_pq(rgb.r),    oetf_pq(rgb.g),    oetf_pq(rgb.b));
+        case 4: return vec3(oetf_hlg(rgb.r),   oetf_hlg(rgb.g),   oetf_hlg(rgb.b));
+        case 5: return rgb;  // linear (no OETF)
+        case 6: return vec3(oetf_gamma24(rgb.r), oetf_gamma24(rgb.g), oetf_gamma24(rgb.b));
+        case 7: return vec3(oetf_gamma26(rgb.r), oetf_gamma26(rgb.g), oetf_gamma26(rgb.b));
+        default: return rgb;
+    }
+}
+// ---- Color Grading: Tone Mapping ----
+vec3 tonemap_reinhard(vec3 v)    { return v / (v + 1.0); }
+vec3 tonemap_aces_filmic(vec3 x) { return clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14), 0.0, 1.0); }
+vec3 tonemap_aces_rrt(vec3 v) {
+    v *= 0.6;
+    vec3 a = v * (v + 0.0245786) - 0.000090537;
+    vec3 b = v * (0.983729 * v + 0.432951) + 0.238081;
+    return clamp(a / b, 0.0, 1.0);
+}
+
+// HLG OOTF: BT.2100 system gamma for display rendering.
+// gamma = 1.2 * 1.111^log2(Lw/1000), where Lw = display peak luminance in nits.
+// Includes soft-knee highlight rolloff for sub-1000-nit displays to avoid hard clipping.
+vec3 tonemap_hlg_ootf(vec3 v, float npl) {
+    float gamma = 1.2 * pow(1.111, log2(npl / 1000.0));
+    float Ys = dot(v, vec3(0.2627, 0.6780, 0.0593));
+    vec3 result = v * pow(max(Ys, 1e-6), gamma - 1.0);
+    if (npl < 1000.0) {
+        float Yd = dot(result, vec3(0.2627, 0.6780, 0.0593));
+        float knee = 0.85;
+        if (Yd > knee) {
+            float compressed = knee + (1.0 - knee) * tanh((Yd - knee) / (1.0 - knee));
+            result *= compressed / max(Yd, 1e-6);
+        }
+    }
+    return result;
+}
+
+// log10 is not a GLSL built-in; define it via natural log.
+float log10(float x) { return log(x) * 0.4342944819032518; }
+
+// ---- ACES Reference Rendering Transform (RRT) + Output Display Transform (ODT) ----
+// Segmented spline fit from the ACES CTL reference implementation.
+// This is the c5 spline used in the RRT.
+float segmented_spline_c5_fwd(float x) {
+    const float coefsLow[6] = float[6](-4.0000000000, -4.0000000000, -3.1573765773, -0.4852499958, 1.8477324706, 1.8477324706);
+    const float coefsHigh[6] = float[6](-0.7185482425, 2.0810307172, 3.6681241237, 4.0000000000, 4.0000000000, 4.0000000000);
+    const float minPoint_x = 0.0001; const float minPoint_y = 0.0001;
+    const float midPoint_x = 0.18;   const float midPoint_y = 4.8;
+    const float maxPoint_x = 65504.0; const float maxPoint_y = 10000.0;
+    const int N_KNOTS_LOW = 4; const int N_KNOTS_HIGH = 4;
+
+    float xCheck = clamp(x, minPoint_x, maxPoint_x);
+    float logx = log10(xCheck);
+    float logy;
+
+    if (logx <= log10(midPoint_x)) {
+        float knot_coord = (logx - log10(minPoint_x)) / (log10(midPoint_x) - log10(minPoint_x)) * float(N_KNOTS_LOW);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_LOW - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsLow[j]; float cf1 = coefsLow[j+1]; float cf2 = coefsLow[min(j+2, 5)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    } else {
+        float knot_coord = (logx - log10(midPoint_x)) / (log10(maxPoint_x) - log10(midPoint_x)) * float(N_KNOTS_HIGH);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_HIGH - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsHigh[j]; float cf1 = coefsHigh[j+1]; float cf2 = coefsHigh[min(j+2, 5)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    }
+    return pow(10.0, logy);
+}
+
+// c9 spline used in the ODTs
+float segmented_spline_c9_fwd(float x, float minPt_y, float midPt_y, float maxPt_y) {
+    const float coefsLow[10] = float[10](-1.6989700043, -1.6989700043, -1.4779000000, -1.2291000000, -0.8648000000, -0.4480000000, 0.0051800000, 0.4511080334, 0.9113744414, 0.9113744414);
+    const float coefsHigh[10] = float[10](0.5154386965, 0.8470437783, 1.1358000000, 1.3802000000, 1.5197000000, 1.5985000000, 1.6467000000, 1.6746091357, 1.6878733390, 1.6878733390);
+    const int N_KNOTS_LOW = 8; const int N_KNOTS_HIGH = 8;
+    const float minPt_x = 0.18 * exp2(-6.5);
+    const float midPt_x = 0.18;
+    const float maxPt_x = 0.18 * exp2(6.5);
+
+    float xCheck = clamp(x, minPt_x, maxPt_x);
+    float logx = log10(xCheck);
+    float logy;
+
+    if (logx <= log10(midPt_x)) {
+        float knot_coord = (logx - log10(minPt_x)) / (log10(midPt_x) - log10(minPt_x)) * float(N_KNOTS_LOW);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_LOW - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsLow[j]; float cf1 = coefsLow[j+1]; float cf2 = coefsLow[min(j+2, 9)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    } else {
+        float knot_coord = (logx - log10(midPt_x)) / (log10(maxPt_x) - log10(midPt_x)) * float(N_KNOTS_HIGH);
+        int j = int(clamp(knot_coord, 0.0, float(N_KNOTS_HIGH - 1)));
+        float t = clamp(knot_coord - float(j), 0.0, 1.0);
+        float cf0 = coefsHigh[j]; float cf1 = coefsHigh[j+1]; float cf2 = coefsHigh[min(j+2, 9)];
+        float c0 = mix(cf0, cf1, 0.5); float c1 = cf1; float c2 = mix(cf1, cf2, 0.5);
+        logy = mix(mix(c0, c1, t), mix(c1, c2, t), t);
+    }
+    return pow(10.0, logy);
+}
+
+// ACES RRT: apply segmented spline c5 per channel (in ACES AP1 / ACEScg)
+vec3 aces_rrt(vec3 v) {
+    return vec3(segmented_spline_c5_fwd(v.r),
+                segmented_spline_c5_fwd(v.g),
+                segmented_spline_c5_fwd(v.b));
+}
+
+// ACES ODT for sRGB/Rec.709 100 nit display
+vec3 aces_odt_srgb(vec3 v) {
+    v = vec3(segmented_spline_c9_fwd(v.r, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.g, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.b, 0.0001, 4.8, 48.0));
+    v /= 48.0;
+    return clamp(v, 0.0, 1.0);
+}
+
+// ACES RRT+ODT combined for Rec.709 SDR display (op=4)
+vec3 tonemap_aces_rrt_709(vec3 v) {
+    v = aces_rrt(v);
+    return aces_odt_srgb(v);
+}
+
+// ACES RRT+ODT for P3-D65 display (op=5)
+vec3 tonemap_aces_rrt_p3(vec3 v) {
+    v = aces_rrt(v);
+    v = vec3(segmented_spline_c9_fwd(v.r, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.g, 0.0001, 4.8, 48.0),
+             segmented_spline_c9_fwd(v.b, 0.0001, 4.8, 48.0));
+    v /= 48.0;
+    return clamp(v, 0.0, 1.0);
+}
+
+// ACES RRT+ODT for Rec.2020 1000-nit HDR PQ display (op=6)
+vec3 tonemap_aces_rrt_2020_pq(vec3 v) {
+    v = aces_rrt(v);
+    v = vec3(segmented_spline_c9_fwd(v.r, 0.005, 4.8, 800.0),
+             segmented_spline_c9_fwd(v.g, 0.005, 4.8, 800.0),
+             segmented_spline_c9_fwd(v.b, 0.005, 4.8, 800.0));
+    v /= 1000.0;
+    return clamp(v, 0.0, 1.0);
+}
+
+vec3 apply_tone_mapping(vec3 rgb, int op) {
+    switch (op) {
+        case 1: return tonemap_reinhard(rgb);
+        case 2: return tonemap_aces_filmic(rgb);
+        case 3: return tonemap_aces_rrt(rgb);
+        case 4: return tonemap_aces_rrt_709(rgb);
+        case 5: return tonemap_aces_rrt_p3(rgb);
+        case 6: return tonemap_aces_rrt_2020_pq(rgb);
+        case 7: return tonemap_hlg_ootf(rgb, display_peak_luminance);
+        default: return rgb;
+    }
+}
+
 void main()
 {
     vec4 color = get_rgba_color();
@@ -671,6 +898,15 @@ void main()
         color.rgb *= color.a;
     if (chroma)
         color = chroma_key(color);
+    // Input conversion, before the grading chain: the chain must operate in the
+    // working space.
+    if (color_grading) {
+        color.rgb  = apply_eotf(color.rgb, input_transfer);
+        color.rgb *= luminance_scale;
+        color.bgr  = input_to_working * color.bgr;
+        color.rgb *= exposure;
+    }
+
     // Per-channel uniforms arrive in RGB order and are swizzled to the working order
     // here -- see the channel-order note above the grading functions.
     if (cdl_enable)
@@ -686,6 +922,15 @@ void main()
     if (split_tone_enable)
         color.rgb =
             apply_split_tone(color.rgb, split_shadow_color.bgr, split_highlight_color.bgr, split_balance);
+    // Output half: tone map from the working space, then encode for the display.
+    if (color_grading) {
+        if (tone_mapping_op > 0)
+            color.rgb = apply_tone_mapping(color.rgb, tone_mapping_op);
+        color.bgr  = working_to_output * color.bgr;
+        if (tone_mapping_op == 0)
+            color.rgb = clamp(color.rgb, 0.0, 1.0);
+        color.rgb  = apply_oetf(color.rgb, output_transfer);
+    }
     if(levels)
         color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
     if(csb)

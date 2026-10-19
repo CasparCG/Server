@@ -1020,6 +1020,235 @@ std::future<std::wstring> mixer_chroma_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+// Refuse an unrecognised token, naming the ones that would have worked.
+[[noreturn]] static void reject_token(const std::wstring& got, const wchar_t* what, const wchar_t* valid)
+{
+    CASPAR_THROW_EXCEPTION(user_error() << msg_info(std::wstring(what) + L" must be one of " +
+                                                    valid + L", got: " + got));
+}
+
+// LINEAR, BT709 and NONE need cases of their own: they were only ever reachable as the
+// fallback, and would be refused without one.
+static int parse_transfer_fn(const std::wstring& s)
+{
+    if (boost::iequals(s, L"LINEAR"))
+        return 0;
+    if (boost::iequals(s, L"SRGB"))
+        return 1;
+    if (boost::iequals(s, L"REC709"))
+        return 2;
+    if (boost::iequals(s, L"PQ"))
+        return 3;
+    if (boost::iequals(s, L"HLG"))
+        return 4;
+    if (boost::iequals(s, L"LOGC3"))
+        return 5;
+    if (boost::iequals(s, L"SLOG3"))
+        return 6;
+    reject_token(s, L"transfer function", L"LINEAR, SRGB, REC709, PQ, HLG, LOGC3 or SLOG3");
+}
+
+static int parse_gamut_fn(const std::wstring& s)
+{
+    if (boost::iequals(s, L"BT709") || boost::iequals(s, L"REC709"))
+        return 0;
+    if (boost::iequals(s, L"BT2020"))
+        return 1;
+    if (boost::iequals(s, L"DCIP3"))
+        return 2;
+    if (boost::iequals(s, L"ACES_AP0"))
+        return 3;
+    if (boost::iequals(s, L"ACES_AP1"))
+        return 4;
+    if (boost::iequals(s, L"ACESCG"))
+        return 4;
+    if (boost::iequals(s, L"ARRI_WG3"))
+        return 5;
+    if (boost::iequals(s, L"SGAMUT3_CINE"))
+        return 6;
+    reject_token(s, L"gamut",
+                 L"BT709, BT2020, DCIP3, ACES_AP0, ACES_AP1 (ACESCG), ARRI_WG3 or SGAMUT3_CINE");
+}
+
+static int parse_tonemapping_fn(const std::wstring& s)
+{
+    if (boost::iequals(s, L"NONE"))
+        return 0;
+    if (boost::iequals(s, L"REINHARD"))
+        return 1;
+    if (boost::iequals(s, L"ACES_FILMIC"))
+        return 2;
+    if (boost::iequals(s, L"ACES_RRT"))
+        return 3;
+    if (boost::iequals(s, L"ACES_RRT_709"))
+        return 4;
+    if (boost::iequals(s, L"ACES_RRT_P3"))
+        return 5;
+    if (boost::iequals(s, L"ACES_RRT_2020_PQ"))
+        return 6;
+    reject_token(s, L"tone mapping operator",
+                 L"NONE, REINHARD, ACES_FILMIC, ACES_RRT, ACES_RRT_709, ACES_RRT_P3 or "
+                 L"ACES_RRT_2020_PQ");
+}
+
+static std::wstring to_wstring_transfer(int t)
+{
+    switch (t) {
+        case 1:
+            return L"SRGB";
+        case 2:
+            return L"REC709";
+        case 3:
+            return L"PQ";
+        case 4:
+            return L"HLG";
+        case 5:
+            return L"LOGC3";
+        case 6:
+            return L"SLOG3";
+        default:
+            return L"LINEAR";
+    }
+}
+static std::wstring to_wstring_gamut(int g)
+{
+    switch (g) {
+        case 1:
+            return L"BT2020";
+        case 2:
+            return L"DCIP3";
+        case 3:
+            return L"ACES_AP0";
+        case 4:
+            return L"ACES_AP1"; // ACEScg
+        case 5:
+            return L"ARRI_WG3";
+        case 6:
+            return L"SGAMUT3_CINE";
+        default:
+            return L"BT709";
+    }
+}
+static std::wstring to_wstring_tonemap(int tm)
+{
+    switch (tm) {
+        case 1:
+            return L"REINHARD";
+        case 2:
+            return L"ACES_FILMIC";
+        case 3:
+            return L"ACES_RRT";
+        case 4:
+            return L"ACES_RRT_709";
+        case 5:
+            return L"ACES_RRT_P3";
+        case 6:
+            return L"ACES_RRT_2020_PQ";
+        default:
+            return L"NONE";
+    }
+}
+
+// Parse one grading argument and refuse it if it is outside the parameter's defined
+// range, so a bad value is a 403 naming the offender rather than a silently applied
+// grade -- or, for a NaN, a black layer. `grade_limits` is the same table that
+// apply_transform_colour_values clamps combined transforms to; if the two disagreed,
+// stacking two legal layers could reach a value no command would accept.
+//
+// Scoped to the commands added in this series. The older mixer commands validate
+// nothing (MIXER OPACITY -5 is accepted today) and retrofitting them would change
+// behaviour for existing clients, which belongs in its own change.
+double grade_param(const std::wstring& raw, core::grade_range range, const wchar_t* name)
+{
+    double value = 0.0;
+    try {
+        value = std::stod(raw);
+    } catch (...) {
+        CASPAR_THROW_EXCEPTION(user_error()
+                               << msg_info(std::wstring(name) + L" is not a number: " + raw));
+    }
+    if (!range.contains(value)) {
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(std::wstring(name) + L" must be between " +
+                                                       std::to_wstring(range.lo) + L" and " +
+                                                       std::to_wstring(range.hi) + L", got " + raw));
+    }
+    return value;
+}
+
+// Refuse a short parameter list by name. Without this the .at() below throws
+// std::out_of_range, which surfaces as a generic failure rather than saying which
+// command wanted how many arguments.
+void grade_require(const command_context& ctx, size_t count, const wchar_t* usage)
+{
+    if (ctx.parameters.size() < count) {
+        CASPAR_THROW_EXCEPTION(user_error() << msg_info(std::wstring(L"expected at least ") +
+                                                       std::to_wstring(count) + L" parameters: " + usage));
+    }
+}
+
+std::future<std::wstring> mixer_colorspace_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto cg = transform2.get().image_transform.color_grade;
+            return L"201 MIXER OK\r\n" +
+                   (cg.enable ? (to_wstring_transfer(cg.input_transfer) + L" " + to_wstring_gamut(cg.input_gamut) +
+                                 L" " + to_wstring_tonemap(cg.tone_mapping) + L" " + to_wstring_gamut(cg.output_gamut) +
+                                 L" " + to_wstring_transfer(cg.output_transfer) + L" " + std::to_wstring(cg.exposure))
+                              : std::wstring(L"NONE")) +
+                   L"\r\n";
+        });
+    }
+
+    // MIXER 1-1 COLORSPACE [input_transfer] [input_gamut] [tonemapping] [output_gamut] [output_transfer] [exposure]
+    // Disable with: MIXER 1-1 COLORSPACE NONE
+    transforms_applier transforms(ctx);
+
+    if (boost::iequals(ctx.parameters.at(0), L"NONE")) {
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) {
+                t.image_transform.color_grade.enable = false;
+                return t;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    int   it       = parse_transfer_fn(ctx.parameters.at(0));
+    int   ig       = ctx.parameters.size() > 1 ? parse_gamut_fn(ctx.parameters.at(1)) : 0;
+    int   tm       = ctx.parameters.size() > 2 ? parse_tonemapping_fn(ctx.parameters.at(2)) : 0;
+    int   og       = ctx.parameters.size() > 3 ? parse_gamut_fn(ctx.parameters.at(3)) : 0;
+    int   ot       = ctx.parameters.size() > 4 ? parse_transfer_fn(ctx.parameters.at(4)) : 1;
+    float exposure = ctx.parameters.size() > 5
+                         ? static_cast<float>(grade_param(ctx.parameters.at(5),
+                                                          core::grade_limits::exposure,
+                                                          L"exposure"))
+                         : 1.0f;
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            auto& cg           = transform.image_transform.color_grade;
+            cg.enable          = true;
+            cg.input_transfer  = it;
+            cg.input_gamut     = ig;
+            cg.tone_mapping    = tm;
+            cg.output_gamut    = og;
+            cg.output_transfer = ot;
+            cg.exposure        = exposure;
+            return transform;
+        },
+        0,
+        L"linear"));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_blend_command(command_context& ctx)
 {
     if (ctx.parameters.empty())
@@ -1132,42 +1361,6 @@ std::future<std::wstring> mixer_levels_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
-// Parse one grading argument and refuse it if it is outside the parameter's defined
-// range, so a bad value is a 403 naming the offender rather than a silently applied
-// grade -- or, for a NaN, a black layer. `grade_limits` is the same table that
-// apply_transform_colour_values clamps combined transforms to; if the two disagreed,
-// stacking two legal layers could reach a value no command would accept.
-//
-// Scoped to the commands added in this series. The older mixer commands validate
-// nothing (MIXER OPACITY -5 is accepted today) and retrofitting them would change
-// behaviour for existing clients, which belongs in its own change.
-double grade_param(const std::wstring& raw, core::grade_range range, const wchar_t* name)
-{
-    double value = 0.0;
-    try {
-        value = std::stod(raw);
-    } catch (...) {
-        CASPAR_THROW_EXCEPTION(user_error()
-                               << msg_info(std::wstring(name) + L" is not a number: " + raw));
-    }
-    if (!range.contains(value)) {
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info(std::wstring(name) + L" must be between " +
-                                                       std::to_wstring(range.lo) + L" and " +
-                                                       std::to_wstring(range.hi) + L", got " + raw));
-    }
-    return value;
-}
-
-// Refuse a short parameter list by name. Without this the .at() below throws
-// std::out_of_range, which surfaces as a generic failure rather than saying which
-// command wanted how many arguments.
-void grade_require(const command_context& ctx, size_t count, const wchar_t* usage)
-{
-    if (ctx.parameters.size() < count) {
-        CASPAR_THROW_EXCEPTION(user_error() << msg_info(std::wstring(L"expected at least ") +
-                                                       std::to_wstring(count) + L" parameters: " + usage));
-    }
-}
 
 // MIXER WHITEBALANCE temperature tint [duration tween]
 std::future<std::wstring> mixer_whitebalance_command(command_context& ctx)
@@ -2140,6 +2333,7 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER KEYER", mixer_keyer_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER INVERT", mixer_invert_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CHROMA", mixer_chroma_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER COLORSPACE", mixer_colorspace_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BLEND", mixer_blend_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER OPACITY", mixer_opacity_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER BRIGHTNESS", mixer_brightness_command, 0);

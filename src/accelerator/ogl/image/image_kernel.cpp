@@ -247,6 +247,114 @@ struct image_kernel::impl
             shader_->set("chroma", false);
         }
 
+        // Color grading: ACES-based gamut/transfer/tonemapping pipeline.
+        // Gamut index:  0=bt709, 1=bt2020, 2=dcip3_d65, 3=aces_ap0, 4=aces_ap1(acescg), 5=arri_wg3, 6=sgamut3_cine
+        // Transfer:     0=linear, 1=srgb, 2=rec709, 3=pq, 4=hlg, 5=logc3, 6=slog3
+        // Tonemapping:  0=none, 1=reinhard, 2=aces_filmic, 3=aces_rrt, 4=rrt_709, 5=rrt_p3, 6=rrt_2020_pq, 7=hlg_ootf
+        {
+            // From OpenColorIO 2.5.2 through the ACES studio config; each row reproduced
+            // from published primaries (Bradford, or CAT02 for the two camera gamuts).
+            static const float k_to_working[7][9] = {
+                // bt709 -> ACEScg (AP1)
+                {0.6130974f,  0.3395231f,  0.0473795f,  0.0701937f,  0.9163539f,  0.0134524f,  0.0206156f,  0.1095698f,  0.8698146f},
+                // bt2020 -> ACEScg
+                {0.9748950f,  0.0195991f,  0.0055059f,  0.0021796f,  0.9955355f,  0.0022850f,  0.0047972f,  0.0245320f,  0.9706708f},
+                // dcip3 d65 -> ACEScg
+                {0.7357979f,  0.2121665f,  0.0520356f,  0.0471799f,  0.9380457f,  0.0147744f,  0.0035637f,  0.0411419f,  0.9552944f},
+                // aces_ap0 -> ACEScg (AP1)
+                {1.4514393f, -0.2365108f, -0.2149286f, -0.0765538f,  1.1762297f, -0.0996759f,  0.0083161f, -0.0060324f,  0.9977163f},
+                // aces_ap1 identity
+                {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+                // arri wide gamut 3 -> ACEScg
+                {0.9666334f,  0.1155416f, -0.0821751f,  0.0481904f,  1.1849383f, -0.2331287f,  0.0071933f, -0.0665937f,  1.0594004f},
+                // sony sgamut3.cine -> ACEScg
+                {0.9345170f,  0.1436417f, -0.0781587f, -0.0505267f,  1.2616092f, -0.2110825f, -0.0245030f, -0.0306710f,  1.0551741f}
+            };
+            static const float k_to_output[7][9] = {
+                // ACEScg -> bt709
+                { 1.7050509f, -0.6217921f, -0.0832589f, -0.1302564f,  1.1408048f, -0.0105483f, -0.0240034f, -0.1289690f,  1.1529723f},
+                // ACEScg -> bt2020
+                { 1.0258248f, -0.0200532f, -0.0057716f, -0.0022344f,  1.0045865f, -0.0023521f, -0.0050134f, -0.0252901f,  1.0303035f},
+                // ACEScg -> dcip3 d65
+                { 1.3792142f, -0.3088641f, -0.0703500f, -0.0693349f,  1.0822967f, -0.0129619f, -0.0021590f, -0.0454593f,  1.0476184f},
+                // ACEScg -> aces_ap0
+                {0.6954522f,  0.1406787f,  0.1638691f,  0.0447946f,  0.8596711f,  0.0955343f, -0.0055259f,  0.0040252f,  1.0015007f},
+                // ACEScg identity (ap1)
+                { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 1.0f},
+                // ACEScg -> arri wide gamut 3
+                { 1.0389643f, -0.0979906f,  0.0590263f, -0.0441881f,  0.8586612f,  0.1855270f, -0.0098322f,  0.0546406f,  0.9551915f},
+                // ACEScg -> sgamut3.cine
+                { 1.0650269f, -0.1199250f,  0.0548981f,  0.0470203f,  0.7912176f,  0.1617622f,  0.0260986f,  0.0202137f,  0.9536877f}
+            };
+            const auto& cg = transforms.image_transform.color_grade;
+            if (cg.enable) {
+                int ig = std::min(std::max(cg.input_gamut, 0), 6);
+                int og = std::min(std::max(cg.output_gamut, 0), 6);
+                shader_->set("color_grading", true);
+                shader_->set("input_transfer", cg.input_transfer);
+                shader_->set("output_transfer", cg.output_transfer);
+                shader_->set("tone_mapping_op", cg.tone_mapping);
+                shader_->set("display_peak_luminance", 1000.0f);
+                shader_->set("exposure", cg.exposure);
+
+                // When no artistic tone mapping is applied and both gamuts are D65-based
+                // (BT.709=0, BT.2020=1), use direct ITU-R BT.2087 matrices to avoid
+                // chromatic adaptation artifacts from the ACEScg (D60) intermediate.
+                static const float k_direct_cg[2][2][9] = {
+                    { // from bt709
+                        {1, 0, 0, 0, 1, 0, 0, 0, 1}, // -> bt709 (identity)
+                        {0.6274039f, 0.3292830f, 0.0433131f, 0.0690972f, 0.9195404f, 0.0113623f, 0.0163914f, 0.0880133f, 0.8955953f}, // -> bt2020
+                    },
+                    { // from bt2020
+                        {1.6604910f, -0.5876411f, -0.0728499f, -0.1245505f, 1.1328999f, -0.0083494f, -0.0181508f, -0.1005789f, 1.1187297f}, // -> bt709
+                        {1, 0, 0, 0, 1, 0, 0, 0, 1}, // -> bt2020 (identity)
+                    },
+                };
+                static const float k_identity_cg[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+
+                if (cg.tone_mapping == 0 && ig <= 1 && og <= 1) {
+                    // Direct D65<->D65 conversion -- no ACEScg intermediate needed
+                    shader_->set_matrix3("input_to_working", k_direct_cg[ig][og]);
+                    shader_->set_matrix3("working_to_output", k_identity_cg);
+                } else {
+                    // Full ACES grading pipeline through ACEScg working space
+                    shader_->set_matrix3("input_to_working", k_to_working[ig]);
+                    shader_->set_matrix3("working_to_output", k_to_output[og]);
+                }
+
+                // BT.2408 luminance adaptation: scale linear light when crossing
+                // HDR/SDR domains.
+                // For PQ (absolute): simple ratio 100/10000 or 10000/100.
+                // For HLG (scene-referred, OOTF gamma=1.2): SDR white at 75% HLG
+                // signal per BT.2408 section 3.2 -> scene-linear factor 0.265.
+                auto get_luminance_scale = [](int src_t, int tgt_t) -> float {
+                    constexpr float k_sdr_hlg = 0.265f; // BT.2408: 75% HLG signal for SDR ref white
+                    bool            src_sdr   = (src_t <= 2); // 0=linear, 1=srgb, 2=rec709
+                    bool            tgt_sdr   = (tgt_t <= 2);
+                    bool            src_hlg   = (src_t == 4);
+                    bool            tgt_hlg   = (tgt_t == 4);
+                    bool            src_pq    = (src_t == 3);
+                    bool            tgt_pq    = (tgt_t == 3);
+                    if (src_sdr && tgt_hlg)
+                        return k_sdr_hlg; // SDR -> HLG
+                    if (src_hlg && tgt_sdr)
+                        return 1.0f / k_sdr_hlg; // HLG -> SDR (3.774)
+                    if (src_sdr && tgt_pq)
+                        return 0.01f; // SDR -> PQ (100/10000)
+                    if (src_pq && tgt_sdr)
+                        return 100.0f; // PQ -> SDR
+                    if (src_hlg && tgt_pq)
+                        return 0.1f; // HLG -> PQ (1000/10000)
+                    if (src_pq && tgt_hlg)
+                        return 10.0f; // PQ -> HLG
+                    return 1.0f;      // same domain
+                };
+                shader_->set("luminance_scale", get_luminance_scale(cg.input_transfer, cg.output_transfer));
+            } else {
+                shader_->set("color_grading", false);
+            }
+        }
+
         // Setup blend_func
 
         if (transforms.image_transform.is_key) {

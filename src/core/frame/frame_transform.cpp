@@ -103,6 +103,13 @@ image_transform image_transform::tween(double                 time,
         do_tween(time, source.chroma.spill_suppress_saturation, dest.chroma.spill_suppress_saturation, duration, tween);
     result.chroma.enable    = dest.chroma.enable;
     result.chroma.show_mask = dest.chroma.show_mask;
+    result.color_grade      = dest.color_grade;
+    result.color_grade.exposure =
+        static_cast<float>(do_tween(time,
+                                    static_cast<double>(source.color_grade.exposure),
+                                    static_cast<double>(dest.color_grade.exposure),
+                                    duration,
+                                    tween));
     result.is_key           = source.is_key || dest.is_key;
     result.invert           = source.invert || dest.invert;
     result.is_mix           = source.is_mix || dest.is_mix;
@@ -152,6 +159,16 @@ bool operator==(const rectangle& lhs, const rectangle& rhs)
     return boost::range::equal(lhs.ul, rhs.ul, eq) && boost::range::equal(lhs.lr, rhs.lr, eq);
 }
 
+bool operator==(const color_grade& lhs, const color_grade& rhs)
+{
+    return lhs.enable == rhs.enable && lhs.input_transfer == rhs.input_transfer &&
+           lhs.input_gamut == rhs.input_gamut && lhs.tone_mapping == rhs.tone_mapping &&
+           lhs.output_gamut == rhs.output_gamut && lhs.output_transfer == rhs.output_transfer &&
+           eq(lhs.exposure, rhs.exposure);
+}
+
+bool operator!=(const color_grade& lhs, const color_grade& rhs) { return !(lhs == rhs); }
+
 bool operator==(const image_transform& lhs, const image_transform& rhs)
 {
     return eq(lhs.opacity, rhs.opacity) && eq(lhs.contrast, rhs.contrast) && eq(lhs.brightness, rhs.brightness) &&
@@ -180,7 +197,8 @@ bool operator==(const image_transform& lhs, const image_transform& rhs)
                boost::range::equal(lhs.cdl_slope, rhs.cdl_slope, eq) &&
                boost::range::equal(lhs.cdl_offset, rhs.cdl_offset, eq) &&
                boost::range::equal(lhs.cdl_power, rhs.cdl_power, eq) &&
-               eq(lhs.cdl_saturation, rhs.cdl_saturation) ||
+               eq(lhs.cdl_saturation, rhs.cdl_saturation) &&
+               lhs.color_grade == rhs.color_grade ||
            lhs.enable_geometry_modifiers == rhs.enable_geometry_modifiers;
 }
 

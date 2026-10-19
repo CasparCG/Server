@@ -125,7 +125,29 @@ inline constexpr grade_range cdl_offset{-1.0, 1.0};
 inline constexpr grade_range cdl_power{0.01, 10.0};
 inline constexpr grade_range cdl_saturation{0.0, 10.0};
 
+/// A linear gain in the working space, so zero is black and the upper bound only exists
+/// to keep a typo from saturating the frame.
+inline constexpr grade_range exposure{0.0, 16.0};
+
 } // namespace grade_limits
+// ACES-based per-layer color management (MIXER COLORSPACE).
+// Transfer:    0=linear,1=srgb,2=rec709,3=pq(st2084),4=hlg,5=logc3(arri),6=slog3(sony)
+// Gamut:       0=bt709,1=bt2020,2=dcip3_d65,3=aces_ap0,4=aces_ap1(acescg),5=arri_wg3,6=sgamut3_cine
+// Tonemapping: 0=none,1=reinhard,2=aces_filmic,3=aces_rrt_approx,
+//              4=aces_rrt_709,5=aces_rrt_p3,6=aces_rrt_2020_pq
+struct color_grade final
+{
+    bool  enable          = false;
+    int   input_transfer  = 0;
+    int   input_gamut     = 0;
+    int   tone_mapping    = 0;
+    int   output_gamut    = 0;
+    int   output_transfer = 0;
+    float exposure        = 1.0f;
+};
+
+bool operator==(const color_grade& lhs, const color_grade& rhs);
+bool operator!=(const color_grade& lhs, const color_grade& rhs);
 
 struct image_transform final
 {
@@ -165,6 +187,7 @@ struct image_transform final
     std::array<double, 3> cdl_offset     = {0.0, 0.0, 0.0}; // ASC CDL offset
     std::array<double, 3> cdl_power      = {1.0, 1.0, 1.0}; // ASC CDL power
     double                cdl_saturation = 1.0;             // ASC CDL saturation
+    core::color_grade     color_grade;
 
     bool             is_key      = false;
     bool             invert      = false;
