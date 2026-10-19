@@ -27,6 +27,8 @@
 #include <common/memory.h>
 #include <core/monitor/monitor.h>
 
+#include <functional>
+
 namespace caspar { namespace protocol { namespace osc {
 
 class client
@@ -35,7 +37,16 @@ class client
     client& operator=(const client&);
 
   public:
-    client(std::shared_ptr<boost::asio::io_context> context);
+    /**
+     * @param context              The io_context to run the client's send loop on.
+     * @param diagnostics_provider Called periodically, and only while at least one endpoint has
+     *                             subscribed with include_diagnostics=true, to get a fresh snapshot of
+     *                             every caspar::diagnostics::graph (see core::diagnostics::osc_graph) to
+     *                             broadcast to those endpoints. May be left unset to disable the feature
+     *                             entirely regardless of what subscribers request.
+     */
+    client(std::shared_ptr<boost::asio::io_context> context,
+           std::function<core::monitor::state()>    diagnostics_provider = nullptr);
 
     client(client&&);
 
@@ -45,11 +56,15 @@ class client
      * the token is dropped unless another token to the same endpoint has
      * previously been checked out.
      *
-     * @param endpoint The UDP endpoint to send OSC messages to.
+     * @param endpoint            The UDP endpoint to send OSC messages to.
+     * @param include_diagnostics When true, also send the (more verbose, separately-rated)
+     *                            caspar::diagnostics::graph telemetry under the `/diag/` OSC address
+     *                            prefix to this endpoint - see `OSC SUBSCRIBE <port> DIAG`.
      *
      * @return The token. It is ok for the token to outlive the client
      */
-    std::shared_ptr<void> get_subscription_token(const boost::asio::ip::udp::endpoint& endpoint);
+    std::shared_ptr<void> get_subscription_token(const boost::asio::ip::udp::endpoint& endpoint,
+                                                 bool                                  include_diagnostics = false);
 
     ~client();
 

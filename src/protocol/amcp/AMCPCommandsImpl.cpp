@@ -2080,10 +2080,18 @@ std::wstring osc_subscribe_command(command_context& ctx)
         return L"403 OSC SUBSCRIBE BAD PORT\r\n";
     }
 
-    auto subscription = ctx.static_context->osc_client->get_subscription_token(
-        udp::endpoint(make_address_v4(u8(ctx.client->address())), port));
+    // Optional second parameter opts this subscription into the (more verbose, separately-rated)
+    // caspar::diagnostics::graph telemetry under the `/diag/` OSC address prefix - a lightweight,
+    // network-friendly alternative to the SFML DIAG window.
+    bool include_diagnostics = ctx.parameters.size() > 1 && boost::iequals(ctx.parameters.at(1), L"DIAG");
 
-    ctx.client->add_lifecycle_bound_object(get_osc_subscription_token(port), subscription);
+    auto subscription = ctx.static_context->osc_client->get_subscription_token(
+        udp::endpoint(make_address_v4(u8(ctx.client->address())), port), include_diagnostics);
+
+    const auto token                 = get_osc_subscription_token(port);
+    auto       previous_subscription = ctx.client->remove_lifecycle_bound_object(token);
+    ctx.client->add_lifecycle_bound_object(token, subscription);
+    previous_subscription.reset();
 
     return L"202 OSC SUBSCRIBE OK\r\n";
 }

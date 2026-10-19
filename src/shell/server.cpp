@@ -33,6 +33,7 @@
 
 #include <core/consumer/output.h>
 #include <core/diagnostics/call_context.h>
+#include <core/diagnostics/osc_graph.h>
 #include <core/diagnostics/osd_graph.h>
 #include <core/frame/pixel_format.h>
 #include <core/mixer/image/image_mixer.h>
@@ -106,8 +107,9 @@ struct server::impl
     std::shared_ptr<amcp::command_context_factory>         amcp_context_factory_;
     std::vector<spl::shared_ptr<IO::AsyncEventServer>>     async_servers_;
     std::shared_ptr<IO::AsyncEventServer>                  primary_amcp_server_;
-    std::shared_ptr<osc::client>                           osc_client_ = std::make_shared<osc::client>(io_context_);
-    std::vector<std::shared_ptr<void>>                     predefined_osc_subscriptions_;
+    std::shared_ptr<osc::client>                           osc_client_ =
+        std::make_shared<osc::client>(io_context_, [] { return core::diagnostics::osc_graph::snapshot_state(); });
+    std::vector<std::shared_ptr<void>>                            predefined_osc_subscriptions_;
     spl::shared_ptr<std::vector<protocol::amcp::channel_context>> channels_;
     spl::shared_ptr<core::cg_producer_registry>                   cg_registry_;
     spl::shared_ptr<core::frame_producer_registry>                producer_registry_;
@@ -125,6 +127,7 @@ struct server::impl
         , shutdown_server_now_(std::move(shutdown_server_now))
     {
         caspar::core::diagnostics::osd::register_sink();
+        caspar::core::diagnostics::osc_graph::register_sink();
     }
 
     void start()
@@ -349,14 +352,15 @@ struct server::impl
                  pt | witerate_children(L"configuration.osc.predefined-clients") | welement_context_iteration) {
                 ptree_verify_element_name(predefined_client, L"predefined-client");
 
-                const auto address = ptree_get<std::wstring>(predefined_client.second, L"address");
-                const auto port    = ptree_get<unsigned short>(predefined_client.second, L"port");
+                const auto address             = ptree_get<std::wstring>(predefined_client.second, L"address");
+                const auto port                = ptree_get<unsigned short>(predefined_client.second, L"port");
+                const auto include_diagnostics = predefined_client.second.get(L"diagnostics", false);
 
                 boost::system::error_code ec;
                 auto                      ipaddr = make_address_v4(u8(address), ec);
                 if (!ec)
                     predefined_osc_subscriptions_.push_back(
-                        osc_client_->get_subscription_token(udp::endpoint(ipaddr, port)));
+                        osc_client_->get_subscription_token(udp::endpoint(ipaddr, port), include_diagnostics));
                 else
                     CASPAR_LOG(warning) << "Invalid OSC client. Must be valid ipv4 address: " << address;
             }
