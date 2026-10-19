@@ -140,10 +140,30 @@ struct image_kernel::impl
                     transform.fill_scale[1] *= target_scale / height_scale;
                     break;
 
+                case core::frame_geometry::scale_mode::fit_center:
+                    target_scale = std::min(width_scale, height_scale);
+
+                    transform.fill_scale[0] *= target_scale / width_scale;
+                    transform.fill_scale[1] *= target_scale / height_scale;
+
+                    transform.fill_translation[0] = (1.0 - transform.fill_scale[0]) * 0.5;
+                    transform.fill_translation[1] = (1.0 - transform.fill_scale[1]) * 0.5;
+                    break;
+
                 case core::frame_geometry::scale_mode::fill:
                     target_scale = std::max(width_scale, height_scale);
                     transform.fill_scale[0] *= target_scale / width_scale;
                     transform.fill_scale[1] *= target_scale / height_scale;
+                    break;
+
+                case core::frame_geometry::scale_mode::fill_center:
+                    target_scale = std::max(width_scale, height_scale);
+                    transform.fill_scale[0] *= target_scale / width_scale;
+                    transform.fill_scale[1] *= target_scale / height_scale;
+
+                    transform.fill_translation[0] = (1.0 - transform.fill_scale[0]) * 0.5;
+                    transform.fill_translation[1] = (1.0 - transform.fill_scale[1]) * 0.5;
+
                     break;
 
                 case core::frame_geometry::scale_mode::original:
@@ -151,12 +171,35 @@ struct image_kernel::impl
                     transform.fill_scale[1] /= height_scale;
                     break;
 
+                case core::frame_geometry::scale_mode::original_center:
+                    transform.fill_scale[0] /= width_scale;
+                    transform.fill_scale[1] /= height_scale;
+
+                    transform.fill_translation[0] = (1.0 - transform.fill_scale[0]) * 0.5;
+                    transform.fill_translation[1] = (1.0 - transform.fill_scale[1]) * 0.5;
+
+                    break;
+
                 case core::frame_geometry::scale_mode::hfill:
                     transform.fill_scale[1] *= width_scale / height_scale;
                     break;
 
+                case core::frame_geometry::scale_mode::hfill_center:
+                    transform.fill_scale[1] *= width_scale / height_scale;
+
+                    transform.fill_translation[0] = (1.0 - transform.fill_scale[0]) * 0.5;
+                    transform.fill_translation[1] = (1.0 - transform.fill_scale[1]) * 0.5;
+                    break;
+
                 case core::frame_geometry::scale_mode::vfill:
                     transform.fill_scale[0] *= height_scale / width_scale;
+                    break;
+
+                case core::frame_geometry::scale_mode::vfill_center:
+                    transform.fill_scale[0] *= height_scale / width_scale;
+
+                    transform.fill_translation[0] = (1.0 - transform.fill_scale[0]) * 0.5;
+                    transform.fill_translation[1] = (1.0 - transform.fill_scale[1]) * 0.5;
                     break;
 
                 default:;

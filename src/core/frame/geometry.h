@@ -39,10 +39,15 @@ class frame_geometry
     {
         stretch, // default
         fit,
+        fit_center,
         fill,
+        fill_center,
         original,
+        original_center,
         hfill,
+        hfill_center,
         vfill,
+        vfill_center,
     };
 
     struct coord

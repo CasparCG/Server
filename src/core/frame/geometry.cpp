@@ -92,14 +92,24 @@ frame_geometry::scale_mode scale_mode_from_string(const std::wstring& str)
     auto str2 = boost::to_lower_copy(str);
     if (str2 == L"fit") {
         return frame_geometry::scale_mode::fit;
+    } else if (str2 == L"fit_center") {
+        return frame_geometry::scale_mode::fit_center;
     } else if (str2 == L"fill") {
         return frame_geometry::scale_mode::fill;
+    } else if (str2 == L"fill_center") {
+        return frame_geometry::scale_mode::fill_center;
     } else if (str2 == L"original") {
         return frame_geometry::scale_mode::original;
+    } else if (str2 == L"original_center") {
+        return frame_geometry::scale_mode::original_center;
     } else if (str2 == L"hfill") {
         return frame_geometry::scale_mode::hfill;
+    } else if (str2 == L"hfill_center") {
+        return frame_geometry::scale_mode::hfill_center;
     } else if (str2 == L"vfill") {
         return frame_geometry::scale_mode::vfill;
+    } else if (str2 == L"vfill_center") {
+        return frame_geometry::scale_mode::vfill_center;
     } else {
         return frame_geometry::scale_mode::stretch;
     }
@@ -110,14 +120,24 @@ std::wstring scale_mode_to_string(frame_geometry::scale_mode mode)
     switch (mode) {
         case frame_geometry::scale_mode::fit:
             return L"FIT";
+        case frame_geometry::scale_mode::fit_center:
+            return L"FIT_CENTER";
         case frame_geometry::scale_mode::fill:
             return L"FILL";
+        case frame_geometry::scale_mode::fill_center:
+            return L"FILL_CENTER";
         case frame_geometry::scale_mode::original:
             return L"ORIGINAL";
+        case frame_geometry::scale_mode::original_center:
+            return L"ORIGINAL_CENTER";
         case frame_geometry::scale_mode::hfill:
             return L"HFILL";
+        case frame_geometry::scale_mode::hfill_center:
+            return L"HFILL_CENTER";
         case frame_geometry::scale_mode::vfill:
             return L"VFILL";
+        case frame_geometry::scale_mode::vfill_center:
+            return L"VFILL_CENTER";
         default:
             return L"STRETCH";
     }
