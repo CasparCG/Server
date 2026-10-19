@@ -114,7 +114,41 @@ class Decoder
     boost::condition_variable            output_cond;
     int                                  output_capacity = 8;
 
+    // Flush-in-place synchronisation. A flush request is raised by the producer thread
+    // (Decoder::flush) but is always serviced on the worker thread (do_flush), because the
+    // worker is the only thread allowed to touch `ctx`. This lets a looping producer reuse
+    // the decoder across a loop wrap instead of destroying and recreating the thread + codec
+    // context every loop, which was the source of the heap-allocation churn.
+    std::atomic<bool>         flush_request_ = {false};
+    mutable boost::mutex      flush_ack_mutex;
+    boost::condition_variable flush_ack_cond;
+
     boost::thread thread;
+
+    // Runs on the worker thread only.
+    void do_flush()
+    {
+        {
+            boost::lock_guard<boost::mutex>       lock(input_mutex);
+            std::queue<std::shared_ptr<AVPacket>> empty;
+            input.swap(empty);
+        }
+        {
+            boost::lock_guard<boost::mutex>      lock(output_mutex);
+            std::queue<std::shared_ptr<AVFrame>> empty;
+            output.swap(empty);
+        }
+
+        avcodec_flush_buffers(ctx.get());
+        next_pts = AV_NOPTS_VALUE;
+        eof      = false;
+
+        {
+            boost::lock_guard<boost::mutex> lock(flush_ack_mutex);
+            flush_request_.store(false);
+        }
+        flush_ack_cond.notify_all();
+    }
 
   public:
     std::shared_ptr<AVCodecContext> ctx;
@@ -160,7 +194,17 @@ class Decoder
 
         thread = boost::thread([this]() {
             try {
-                while (!thread.interruption_requested()) {
+                // NOTE: Check interruption via the current-thread helper rather than reading the
+                // `thread` member, which is still being assigned by the constructor when this
+                // lambda starts running (data race on the partially-constructed member).
+                while (!boost::this_thread::interruption_requested()) {
+                    // Flush-in-place sync point: service a pending flush on this worker thread
+                    // (the only thread allowed to touch ctx) before doing any more decoding.
+                    if (flush_request_.load()) {
+                        do_flush();
+                        continue;
+                    }
+
                     auto av_frame = alloc_frame();
                     auto ret      = avcodec_receive_frame(ctx.get(), av_frame.get());
 
@@ -168,7 +212,10 @@ class Decoder
                         std::shared_ptr<AVPacket> packet;
                         {
                             boost::unique_lock<boost::mutex> lock(input_mutex);
-                            input_cond.wait(lock, [&]() { return !input.empty(); });
+                            input_cond.wait(lock, [&]() { return !input.empty() || flush_request_.load(); });
+                            if (flush_request_.load()) {
+                                continue;
+                            }
                             packet = std::move(input.front());
                             input.pop();
                         }
@@ -181,7 +228,11 @@ class Decoder
 
                         {
                             boost::unique_lock<boost::mutex> lock(output_mutex);
-                            output_cond.wait(lock, [&]() { return output.size() < output_capacity; });
+                            output_cond.wait(
+                                lock, [&]() { return output.size() < output_capacity || flush_request_.load(); });
+                            if (flush_request_.load()) {
+                                continue;
+                            }
                             output.push(std::move(av_frame));
                         }
                     } else {
@@ -233,7 +284,11 @@ class Decoder
 
                         {
                             boost::unique_lock<boost::mutex> lock(output_mutex);
-                            output_cond.wait(lock, [&]() { return output.size() < output_capacity; });
+                            output_cond.wait(
+                                lock, [&]() { return output.size() < output_capacity || flush_request_.load(); });
+                            if (flush_request_.load()) {
+                                continue;
+                            }
                             output.push(std::move(av_frame));
                         }
                     }
@@ -305,6 +360,23 @@ class Decoder
         }
 
         return frame;
+    }
+
+    // Reset the decoder to a fresh, post-seek state (empty queues, flushed codec buffers)
+    // without destroying the worker thread or codec context. Called by the producer thread;
+    // blocks until the worker thread has performed the flush at a safe sync point.
+    void flush()
+    {
+        if (!thread.joinable()) {
+            return;
+        }
+
+        flush_request_.store(true);
+        input_cond.notify_all();
+        output_cond.notify_all();
+
+        boost::unique_lock<boost::mutex> lock(flush_ack_mutex);
+        flush_ack_cond.wait(lock, [&]() { return !flush_request_.load(); });
     }
 };
 
@@ -783,8 +855,11 @@ struct AVProducer::Impl
 
     ~Impl()
     {
+        // 1) Stop feeding the pipeline.
         input_.abort();
 
+        // 2) Join the run loop FIRST, so nothing else touches decoders_/filters while we
+        //    tear them down.
         try {
             if (thread_.joinable()) {
                 thread_.interrupt();
@@ -794,8 +869,16 @@ struct AVProducer::Impl
             // Do nothing...
         }
 
+        // 3) Stop the filter executors before freeing the graphs they reference.
         video_executor_.reset();
         audio_executor_.reset();
+
+        // 4) Destroy the pipeline explicitly, in a defined order, while fully quiesced,
+        //    instead of relying on implicit member-destruction order.
+        sources_.clear();
+        video_filter_ = Filter{};
+        audio_filter_ = Filter{};
+        decoders_.clear(); // joins each Decoder's worker thread
 
         CASPAR_LOG(debug) << print() << " Joined";
     }
@@ -1222,7 +1305,13 @@ struct AVProducer::Impl
         frame_count_ = 0;
         buffer_eof_  = false;
 
-        decoders_.clear();
+        // Fix 4b: reuse the existing decoders across a loop wrap / seek instead of destroying
+        // and recreating their worker threads and codec contexts every time. Flushing in place
+        // resets each decoder to a fresh post-seek state while avoiding the per-loop heap churn.
+        // reset() below rebuilds the (cheap) filter graphs and re-binds them to these decoders.
+        for (auto& p : decoders_) {
+            p.second.flush();
+        }
 
         reset(time);
     }

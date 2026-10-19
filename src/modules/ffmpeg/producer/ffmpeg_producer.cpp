@@ -26,6 +26,7 @@
 #include "av_producer.h"
 
 #include <common/env.h>
+#include <common/executor.h>
 #include <common/os/filesystem.h>
 #include <common/param.h>
 
@@ -41,7 +42,12 @@
 #include <boost/logic/tribool.hpp>
 #include <common/filesystem.h>
 
+#include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <memory>
+#include <string>
+#include <vector>
 
 extern "C" {
 #define __STDC_CONSTANT_MACROS
@@ -52,6 +58,34 @@ extern "C" {
 namespace caspar { namespace ffmpeg {
 
 using namespace std::chrono_literals;
+
+namespace {
+// Small fixed-size pool of workers that perform the slow ffmpeg teardown off the realtime
+// thread WITHOUT spawning an unbounded number of concurrent threads.
+//
+// Rationale: a single teardown thread would fully serialize destruction, so one producer
+// whose teardown blocks (e.g. a network input whose abort() is slow to unblock the decoder)
+// would stall the teardown of every other producer behind it and leak their memory. A small
+// bounded pool keeps the heap-corruption protection (only a handful of concurrent frees
+// instead of N) while avoiding that head-of-line blocking. Producers are dispatched
+// round-robin across the pool.
+caspar::executor& ffmpeg_producer_destroyer()
+{
+    static constexpr std::size_t        pool_size = 3;
+    static std::vector<std::unique_ptr<caspar::executor>> pool = [] {
+        std::vector<std::unique_ptr<caspar::executor>> workers;
+        workers.reserve(pool_size);
+        for (std::size_t i = 0; i < pool_size; ++i) {
+            workers.push_back(
+                std::make_unique<caspar::executor>(L"ffmpeg_producer_destroyer_" + std::to_wstring(i)));
+        }
+        return workers;
+    }();
+
+    static std::atomic<std::size_t> next{0};
+    return *pool[next.fetch_add(1, std::memory_order_relaxed) % pool_size];
+}
+} // namespace
 
 struct ffmpeg_producer : public core::frame_producer
 {
@@ -94,13 +128,13 @@ struct ffmpeg_producer : public core::frame_producer
 
     ~ffmpeg_producer()
     {
-        std::thread([producer = std::move(producer_)]() mutable {
+        ffmpeg_producer_destroyer().begin_invoke([producer = std::move(producer_)]() mutable {
             try {
                 producer.reset();
             } catch (...) {
                 CASPAR_LOG_CURRENT_EXCEPTION();
             }
-        }).detach();
+        });
     }
 
     // frame_producer
