@@ -160,7 +160,10 @@ class Decoder
 
         thread = boost::thread([this]() {
             try {
-                while (!thread.interruption_requested()) {
+                // NOTE: Check interruption via the current-thread helper rather than reading the
+                // `thread` member, which is still being assigned by the constructor when this
+                // lambda starts running (data race on the partially-constructed member).
+                while (!boost::this_thread::interruption_requested()) {
                     auto av_frame = alloc_frame();
                     auto ret      = avcodec_receive_frame(ctx.get(), av_frame.get());
 
@@ -783,8 +786,11 @@ struct AVProducer::Impl
 
     ~Impl()
     {
+        // 1) Stop feeding the pipeline.
         input_.abort();
 
+        // 2) Join the run loop FIRST, so nothing else touches decoders_/filters while we
+        //    tear them down.
         try {
             if (thread_.joinable()) {
                 thread_.interrupt();
@@ -794,8 +800,16 @@ struct AVProducer::Impl
             // Do nothing...
         }
 
+        // 3) Stop the filter executors before freeing the graphs they reference.
         video_executor_.reset();
         audio_executor_.reset();
+
+        // 4) Destroy the pipeline explicitly, in a defined order, while fully quiesced,
+        //    instead of relying on implicit member-destruction order.
+        sources_.clear();
+        video_filter_ = Filter{};
+        audio_filter_ = Filter{};
+        decoders_.clear(); // joins each Decoder's worker thread
 
         CASPAR_LOG(debug) << print() << " Joined";
     }
