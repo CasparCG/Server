@@ -21,10 +21,7 @@
 
 #pragma once
 
-#include <core/frame/frame.h>
-
-#include <cmath>
-#include <utility>
+#include <string>
 
 namespace caspar { namespace artnet {
 
@@ -35,57 +32,46 @@ enum FixtureType
     RGBW   = 4,
 };
 
-struct point
-{
-    float x;
-    float y;
-};
-
-struct rect
-{
-    point p1;
-    point p2;
-    point p3;
-    point p4;
-};
-
-struct computed_fixture
-{
-    FixtureType    type;
-    unsigned short address;
-
-    rect rectangle;
-};
-
-struct color
-{
-    std::uint8_t r;
-    std::uint8_t g;
-    std::uint8_t b;
-};
-
 struct box
 {
+    // top-left corner
     float x;
     float y;
 
     float width;
     float height;
+};
 
-    float rotation; // degrees
+struct fixture_flux
+{
+    // Relative luminous output per unit DMX value, per LED. Used to compensate when LEDs of
+    // different colors don't share the same brightness curve (typical of cheap RGBW strips).
+    float r = 1.0f;
+    float g = 1.0f;
+    float b = 1.0f;
+    float w = 1.0f;
 };
 
 struct fixture
 {
     FixtureType    type;
-    unsigned short startAddress;    // DMX address of the first channel in the fixture
-    unsigned short fixtureCount;    // number of fixtures in the chain, dividing along the width
+    unsigned short startAddress;    // 0-based channel within the fixture's universe (0..511)
+    unsigned short fixtureCols;     // columns in the fixture grid (dividing along the width)
+    unsigned short fixtureRows;     // rows in the fixture grid (dividing along the height)
     unsigned short fixtureChannels; // number of channels per fixture
 
-    box fixtureBox;
-};
+    // Network target — required, no global fallback
+    std::wstring   host;
+    unsigned short port;
+    int            universe;        // Art-Net universe; grids that overflow 512 ch spill to universe+1
 
-rect  compute_rect(box fixtureBox, int index, int count);
-color average_color(const core::const_frame& frame, rect& rectangle);
+    fixture_flux flux;
+    float        brightness; // overall output multiplier, 0..1
+    box          fixtureBox;
+
+    float rotation; // radians, clockwise, about box center
+    bool  mirror_x;
+    bool  mirror_y;
+};
 
 }} // namespace caspar::artnet
