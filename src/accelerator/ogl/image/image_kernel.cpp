@@ -288,6 +288,61 @@ struct image_kernel::impl
             shader_->set("csb", false);
         }
 
+        // Gamut compression, with ACES 1.3's limits
+        if (transforms.image_transform.gamut_compress) {
+            shader_->set("gamut_compress_enable", true);
+            // BGR order: .r=Blue(yellow), .g=Green(magenta), .b=Red(cyan)
+            shader_->set("gc_limit",
+                         static_cast<float>(transforms.image_transform.gc_cyan),
+                         static_cast<float>(transforms.image_transform.gc_magenta),
+                         static_cast<float>(transforms.image_transform.gc_yellow));
+        } else {
+            shader_->set("gamut_compress_enable", false);
+        }
+
+        // Secondary qualifier (HSL key + grade)
+        if (transforms.image_transform.qualifier_enable) {
+            shader_->set("qualifier_enable", true);
+            shader_->set("qual_target_hue", static_cast<float>(transforms.image_transform.qual_target_hue));
+            shader_->set("qual_hue_width", static_cast<float>(transforms.image_transform.qual_hue_width));
+            shader_->set("qual_min_sat", static_cast<float>(transforms.image_transform.qual_min_sat));
+            shader_->set("qual_max_sat", static_cast<float>(transforms.image_transform.qual_max_sat));
+            shader_->set("qual_min_lum", static_cast<float>(transforms.image_transform.qual_min_lum));
+            shader_->set("qual_max_lum", static_cast<float>(transforms.image_transform.qual_max_lum));
+            shader_->set("qual_softness", static_cast<float>(transforms.image_transform.qual_softness));
+            shader_->set("qual_exposure", static_cast<float>(transforms.image_transform.qual_exposure));
+            shader_->set("qual_sat_offset", static_cast<float>(transforms.image_transform.qual_sat_offset));
+            shader_->set("qual_hue_offset", static_cast<float>(transforms.image_transform.qual_hue_offset));
+        } else {
+            shader_->set("qualifier_enable", false);
+        }
+
+        // Per-channel RGB levels
+        {
+            const auto& rl = transforms.image_transform.per_channel_levels;
+            if (rl.enable) {
+                shader_->set("rgb_levels_enable", true);
+                // BGR order: index [0]=Blue, [1]=Green, [2]=Red -> upload user's channels swapped.
+                shader_->set("rgb_levels_min_input[0]", static_cast<float>(rl.r.min_input));
+                shader_->set("rgb_levels_min_input[1]", static_cast<float>(rl.g.min_input));
+                shader_->set("rgb_levels_min_input[2]", static_cast<float>(rl.b.min_input));
+                shader_->set("rgb_levels_max_input[0]", static_cast<float>(rl.r.max_input));
+                shader_->set("rgb_levels_max_input[1]", static_cast<float>(rl.g.max_input));
+                shader_->set("rgb_levels_max_input[2]", static_cast<float>(rl.b.max_input));
+                shader_->set("rgb_levels_gamma[0]", static_cast<float>(rl.r.gamma));
+                shader_->set("rgb_levels_gamma[1]", static_cast<float>(rl.g.gamma));
+                shader_->set("rgb_levels_gamma[2]", static_cast<float>(rl.b.gamma));
+                shader_->set("rgb_levels_min_output[0]", static_cast<float>(rl.r.min_output));
+                shader_->set("rgb_levels_min_output[1]", static_cast<float>(rl.g.min_output));
+                shader_->set("rgb_levels_min_output[2]", static_cast<float>(rl.b.min_output));
+                shader_->set("rgb_levels_max_output[0]", static_cast<float>(rl.r.max_output));
+                shader_->set("rgb_levels_max_output[1]", static_cast<float>(rl.g.max_output));
+                shader_->set("rgb_levels_max_output[2]", static_cast<float>(rl.b.max_output));
+            } else {
+                shader_->set("rgb_levels_enable", false);
+            }
+        }
+
         // White balance (temperature / tint)
         if (std::abs(transforms.image_transform.temperature) > epsilon ||
             std::abs(transforms.image_transform.tint) > epsilon) {

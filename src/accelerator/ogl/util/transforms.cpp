@@ -72,6 +72,44 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
     self.blend_mode = std::max(self.blend_mode, other.blend_mode);
     self.layer_depth += other.layer_depth;
 
+    // Gamut compression
+    if (other.gamut_compress) {
+        self.gamut_compress = true;
+        self.gc_cyan        = other.gc_cyan;
+        self.gc_magenta     = other.gc_magenta;
+        self.gc_yellow      = other.gc_yellow;
+    }
+
+    // Secondary qualifier
+    if (other.qualifier_enable) {
+        self.qualifier_enable = true;
+        self.qual_target_hue  = other.qual_target_hue;
+        self.qual_hue_width   = other.qual_hue_width;
+        self.qual_min_sat     = other.qual_min_sat;
+        self.qual_max_sat     = other.qual_max_sat;
+        self.qual_min_lum     = other.qual_min_lum;
+        self.qual_max_lum     = other.qual_max_lum;
+        self.qual_softness    = other.qual_softness;
+        self.qual_exposure    = other.qual_exposure;
+        self.qual_sat_offset  = other.qual_sat_offset;
+        self.qual_hue_offset  = other.qual_hue_offset;
+    }
+
+    // Per-channel RGB levels: intersect input range, multiply gamma, intersect output range
+    if (other.per_channel_levels.enable) {
+        self.per_channel_levels.enable = true;
+        auto merge_ch = [](core::rgb_levels_channel& s, const core::rgb_levels_channel& o) {
+            s.min_input  = std::max(s.min_input, o.min_input);
+            s.max_input  = std::min(s.max_input, o.max_input);
+            s.gamma     *= o.gamma;
+            s.min_output = std::max(s.min_output, o.min_output);
+            s.max_output = std::min(s.max_output, o.max_output);
+        };
+        merge_ch(self.per_channel_levels.r, other.per_channel_levels.r);
+        merge_ch(self.per_channel_levels.g, other.per_channel_levels.g);
+        merge_ch(self.per_channel_levels.b, other.per_channel_levels.b);
+    }
+
     // Every combined grading value below is clamped back into the range its MIXER
     // command accepts (core::grade_limits, the same table the commands validate
     // against). Two layers at the edge of legal would otherwise reach a value no single

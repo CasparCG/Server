@@ -43,6 +43,32 @@ uniform float		chroma_softness;
 uniform float		chroma_spill_suppress;
 uniform float		chroma_spill_suppress_saturation;
 
+// Gamut compression, with ACES 1.3's limits
+uniform bool		gamut_compress_enable;
+// Per-channel limits in RGB order (cyan=red, magenta=green, yellow=blue).
+uniform vec3		gc_limit;
+
+// Secondary qualifier (HSL key + grade)
+uniform bool		qualifier_enable;
+uniform float		qual_target_hue;
+uniform float		qual_hue_width;
+uniform float		qual_min_sat;
+uniform float		qual_max_sat;
+uniform float		qual_min_lum;
+uniform float		qual_max_lum;
+uniform float		qual_softness;
+uniform float		qual_exposure;
+uniform float		qual_sat_offset;
+uniform float		qual_hue_offset;
+
+// Per-channel RGB Levels (independent levels per channel)
+uniform bool		rgb_levels_enable;
+uniform float		rgb_levels_min_input[3];
+uniform float		rgb_levels_max_input[3];
+uniform float		rgb_levels_gamma[3];
+uniform float		rgb_levels_min_output[3];
+uniform float		rgb_levels_max_output[3];
+
 // White balance (temperature / tint)
 uniform bool		white_balance;
 uniform float		wb_temperature; // -1 cool (blue) .. +1 warm (orange)
@@ -77,6 +103,16 @@ uniform vec3		cdl_slope;
 uniform vec3		cdl_offset;
 uniform vec3		cdl_power;
 uniform float		cdl_saturation;
+
+// Luma of the working colour, using the channel's own coefficients.
+//
+// luma_coeff is uploaded in RGB order and holds Rec.601, Rec.709 or Rec.2020 weights
+// depending on the source (image_kernel.cpp), so a grade no longer hard-codes Rec.709
+// and no longer disagrees with ContrastSaturationBrightness, which has always read this
+// uniform. The `.bgr` is the working-order swizzle described above -- dot(c.bgr, k) and
+// dot(c, k.bgr) are the same sum, and swizzling the three-element uniform rather than
+// the pixel keeps this the only place the order is mentioned.
+float working_luma(vec3 c) { return dot(c, luma_coeff.bgr); }
 
 /*
 ** Contrast, saturation, brightness
@@ -554,6 +590,83 @@ vec4 get_rgba_color()
     return vec4(0.0, 0.0, 0.0, 0.0);
 }
 
+// ---- Gamut Compression ----
+// Compresses out-of-gamut values toward the achromatic axis using a smooth
+// toe function.  Operates per-channel on the distance from achromatic.
+// An approximation with ACES 1.3's limits, not the ACES algorithm: one threshold
+// rather than three, a rational curve rather than the power form, and all-negative
+// pixels left untouched.
+vec3 apply_gamut_compress(vec3 c, vec3 lim)
+{
+    float achromatic = max(max(c.r, c.g), max(c.b, 0.0));
+    if (achromatic <= 0.0)
+        return c;
+    vec3  dist = (achromatic - c) / abs(achromatic);
+    float thr  = 0.815;
+    for (int i = 0; i < 3; ++i) {
+        if (dist[i] > thr && lim[i] > 1.0001) {
+            float nd = (dist[i] - thr) / (lim[i] - thr);
+            float cd = nd / (1.0 + nd);
+            dist[i]  = thr + cd * (lim[i] - thr);
+        }
+    }
+    return achromatic - dist * abs(achromatic);
+}
+
+// ---- Secondary Qualifier (HSL key + grade) ----
+// Isolates a colour range and applies exposure/saturation/hue corrections only
+// to the qualified pixels, using soft masks for smooth transitions.
+vec3 apply_qualifier(vec3 c, float tgt_hue, float hue_w, float min_s, float max_s,
+                     float min_l, float max_l, float soft, float exp_off,
+                     float sat_off, float hue_off)
+{
+    // c is BGR here -- this backend carries the pixel through grading in the mixer's
+    // native BGR channel order, as gc_limit above and ContrastSaturationBrightness
+    // already account for. rgb2hsv treats its first component as red, so feeding it
+    // unswizzled puts the pixel's hue on the opposite side of the wheel from the
+    // target the user asked for, and the qualifier keys the wrong colour entirely.
+    vec3  hsv      = rgb2hsv(clamp(c.bgr, 0.0, 1.0));
+    float hue_dist = AngleDiff(hsv.x, tgt_hue) * 2.0;
+    float hue_mask = 1.0 - smoothstep(hue_w - soft, hue_w + soft, hue_dist);
+    float sat_mask = smoothstep(min_s - soft, min_s + soft, hsv.y) *
+                     (1.0 - smoothstep(max_s - soft, max_s + soft, hsv.y));
+    float lum_mask = smoothstep(min_l - soft, min_l + soft, hsv.z) *
+                     (1.0 - smoothstep(max_l - soft, max_l + soft, hsv.z));
+    float mask     = hue_mask * sat_mask * lum_mask;
+    if (mask < 0.001)
+        return c;
+    vec3 graded = c;
+    graded *= (1.0 + exp_off);
+    float glum = working_luma(graded);
+    graded     = mix(vec3(glum), graded, 1.0 + sat_off);
+    if (abs(hue_off) > 0.01) {
+        // HDR-safe hue rotation: normalise by peak, rotate, re-scale.
+        float peak = max(max(graded.r, graded.g), max(graded.b, 0.0001));
+        vec3  ghsv = rgb2hsv(clamp((graded / peak).bgr, 0.0, 1.0));
+        ghsv.x     = fract(ghsv.x + hue_off / 360.0);
+        graded     = hsv2rgb(ghsv).bgr * peak;
+    }
+    return mix(c, graded, mask);
+}
+
+// ---- Per-channel RGB Levels ----
+// Independent input range, gamma, and output range per channel.
+// Uniforms are in RGB order; the working vector is BGR, so each channel reads its
+// own RGB slot: c.r (blue) -> [2], c.g -> [1], c.b (red) -> [0].
+vec3 apply_rgb_levels(vec3 c)
+{
+    c.r = clamp((c.r - rgb_levels_min_input[2]) / max(rgb_levels_max_input[2] - rgb_levels_min_input[2], 0.0001), 0.0, 1.0);
+    c.r = pow(c.r, 1.0 / max(rgb_levels_gamma[2], 0.01));
+    c.r = mix(rgb_levels_min_output[2], rgb_levels_max_output[2], c.r);
+    c.g = clamp((c.g - rgb_levels_min_input[1]) / max(rgb_levels_max_input[1] - rgb_levels_min_input[1], 0.0001), 0.0, 1.0);
+    c.g = pow(c.g, 1.0 / max(rgb_levels_gamma[1], 0.01));
+    c.g = mix(rgb_levels_min_output[1], rgb_levels_max_output[1], c.g);
+    c.b = clamp((c.b - rgb_levels_min_input[0]) / max(rgb_levels_max_input[0] - rgb_levels_min_input[0], 0.0001), 0.0, 1.0);
+    c.b = pow(c.b, 1.0 / max(rgb_levels_gamma[0], 0.01));
+    c.b = mix(rgb_levels_min_output[0], rgb_levels_max_output[0], c.b);
+    return c;
+}
+
 // ============================ Primary grading chain ============================
 //
 // CHANNEL ORDER. The colour vector carried through this shader is in BGR order:
@@ -574,15 +687,6 @@ vec4 get_rgba_color()
 // every channel-order defect in here. Test with asymmetric per-channel values.
 // ===============================================================================
 
-// Luma of the working colour, using the channel's own coefficients.
-//
-// luma_coeff is uploaded in RGB order and holds Rec.601, Rec.709 or Rec.2020 weights
-// depending on the source (image_kernel.cpp), so a grade no longer hard-codes Rec.709
-// and no longer disagrees with ContrastSaturationBrightness, which has always read this
-// uniform. The `.bgr` is the working-order swizzle described above -- dot(c.bgr, k) and
-// dot(c, k.bgr) are the same sum, and swizzling the three-element uniform rather than
-// the pixel keeps this the only place the order is mentioned.
-float working_luma(vec3 c) { return dot(c, luma_coeff.bgr); }
 
 // ---- White Balance ----
 // temp: -1=cool (blue), +1=warm (orange); tint_val: -1=magenta, +1=green.
@@ -671,6 +775,9 @@ void main()
         color.rgb *= color.a;
     if (chroma)
         color = chroma_key(color);
+    // Before the primaries, so the rest of the chain sees in-gamut colour.
+    if (gamut_compress_enable)
+        color.rgb = apply_gamut_compress(color.rgb, gc_limit.bgr);
     // Per-channel uniforms arrive in RGB order and are swizzled to the working order
     // here -- see the channel-order note above the grading functions.
     if (cdl_enable)
@@ -686,6 +793,13 @@ void main()
     if (split_tone_enable)
         color.rgb =
             apply_split_tone(color.rgb, split_shadow_color.bgr, split_highlight_color.bgr, split_balance);
+    // Secondary: keys the already-graded image.
+    if (qualifier_enable)
+        color.rgb = apply_qualifier(color.rgb, qual_target_hue, qual_hue_width,
+                                    qual_min_sat, qual_max_sat, qual_min_lum, qual_max_lum,
+                                    qual_softness, qual_exposure, qual_sat_offset, qual_hue_offset);
+    if (rgb_levels_enable)
+        color.rgb = apply_rgb_levels(color.rgb);
     if(levels)
         color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
     if(csb)

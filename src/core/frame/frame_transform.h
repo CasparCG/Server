@@ -59,6 +59,23 @@ struct levels final
     double max_output = 1.0;
 };
 
+struct rgb_levels_channel final
+{
+    double min_input  = 0.0;
+    double max_input  = 1.0;
+    double gamma      = 1.0;
+    double min_output = 0.0;
+    double max_output = 1.0;
+};
+
+struct rgb_levels final
+{
+    bool               enable = false;
+    rgb_levels_channel r;
+    rgb_levels_channel g;
+    rgb_levels_channel b;
+};
+
 struct corners final
 {
     std::array<double, 2> ul = {0.0, 0.0};
@@ -125,6 +142,17 @@ inline constexpr grade_range cdl_offset{-1.0, 1.0};
 inline constexpr grade_range cdl_power{0.01, 10.0};
 inline constexpr grade_range cdl_saturation{0.0, 10.0};
 
+/// Distance threshold from the achromatic axis; meaningless at or below 1.0.
+inline constexpr grade_range gamut_limit{1.0, 2.0};
+/// Absolute position on the wheel, not the signed offset hue_shift uses.
+inline constexpr grade_range hue_degrees{0.0, 360.0};
+inline constexpr grade_range hue_width{0.0, 180.0};
+inline constexpr grade_range unit{0.0, 1.0}; // saturation / luminance bounds, softness
+inline constexpr grade_range offset{-1.0, 1.0};
+/// Gamma shares midtone's bounds: it is the same kind of exponent.
+inline constexpr grade_range level{0.0, 1.0};
+inline constexpr grade_range level_gamma{0.01, 100.0};
+
 } // namespace grade_limits
 
 struct image_transform final
@@ -150,6 +178,22 @@ struct image_transform final
     corners               perspective;
     core::levels          levels;
     core::chroma          chroma;
+    bool                  gamut_compress = false; // ACES 1.3 reference gamut compress
+    double                gc_cyan    = 1.147;     // cyan limit
+    double                gc_magenta = 1.264;     // magenta limit
+    double                gc_yellow  = 1.312;     // yellow limit
+    bool                  qualifier_enable = false; // secondary HSL qualifier
+    double                qual_target_hue  = 0.0;   // 0..1 (hue angle / 360)
+    double                qual_hue_width   = 0.1;   // 0..0.5
+    double                qual_min_sat     = 0.2;   // 0..1
+    double                qual_max_sat     = 1.0;   // 0..1
+    double                qual_min_lum     = 0.0;   // 0..1
+    double                qual_max_lum     = 1.0;   // 0..1
+    double                qual_softness    = 0.1;   // feather width
+    double                qual_exposure    = 0.0;   // exposure offset for qualified region
+    double                qual_sat_offset  = 0.0;   // saturation offset for qualified region
+    double                qual_hue_offset  = 0.0;   // hue offset for qualified region (degrees)
+    core::rgb_levels      per_channel_levels;       // independent per-channel levels
     double                temperature = 0.0; // white balance: -1 cool .. +1 warm
     double                tint        = 0.0; // white balance: -1 magenta .. +1 green
     std::array<double, 3> lift    = {0.0, 0.0, 0.0}; // shadow offset per channel

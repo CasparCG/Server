@@ -1472,6 +1472,187 @@ std::future<std::wstring> mixer_cdl_command(command_context& ctx)
     return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
 }
 
+std::future<std::wstring> mixer_gamutcompress_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto t = transform2.get().image_transform;
+            return L"201 MIXER OK\r\n" + std::to_wstring(t.gamut_compress ? 1 : 0) + L" " +
+                   std::to_wstring(t.gc_cyan) + L" " + std::to_wstring(t.gc_magenta) + L" " +
+                   std::to_wstring(t.gc_yellow) + L"\r\n";
+        });
+    }
+
+    transforms_applier transforms(ctx);
+    bool   enable  = std::stoi(ctx.parameters.at(0)) != 0;
+    double cyan    = ctx.parameters.size() > 1
+                         ? grade_param(ctx.parameters[1], core::grade_limits::gamut_limit, L"cyan limit")
+                         : 1.147;
+    double magenta = ctx.parameters.size() > 2
+                         ? grade_param(ctx.parameters[2], core::grade_limits::gamut_limit, L"magenta limit")
+                         : 1.264;
+    double yellow  = ctx.parameters.size() > 3
+                         ? grade_param(ctx.parameters[3], core::grade_limits::gamut_limit, L"yellow limit")
+                         : 1.312;
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.gamut_compress = enable;
+            transform.image_transform.gc_cyan        = cyan;
+            transform.image_transform.gc_magenta     = magenta;
+            transform.image_transform.gc_yellow      = yellow;
+            return transform;
+        },
+        0,
+        L"linear"));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+std::future<std::wstring> mixer_qualifier_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto transform2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [transform2]() -> std::wstring {
+            auto t = transform2.get().image_transform;
+            if (!t.qualifier_enable)
+                return L"201 MIXER OK\r\nDISABLED\r\n";
+            auto f = [](double v) { return std::to_wstring(v); };
+            return L"201 MIXER OK\r\n" + f(t.qual_target_hue) + L" " + f(t.qual_hue_width) + L" " +
+                   f(t.qual_min_sat) + L" " + f(t.qual_max_sat) + L" " + f(t.qual_min_lum) + L" " +
+                   f(t.qual_max_lum) + L" " + f(t.qual_softness) + L" " + f(t.qual_exposure) + L" " +
+                   f(t.qual_sat_offset) + L" " + f(t.qual_hue_offset) + L"\r\n";
+        });
+    }
+
+    // Single param "0" = disable
+    if (ctx.parameters.size() == 1 && ctx.parameters.at(0) == L"0") {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) {
+                t.image_transform.qualifier_enable = false;
+                return t;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    transforms_applier transforms(ctx);
+    grade_require(ctx,
+                  10,
+                  L"MIXER QUALIFIER hue width minSat maxSat minLum maxLum softness "
+                  L"exposureOffset satOffset hueOffset [duration] [tween]");
+    double tgt_hue  = grade_param(ctx.parameters.at(0), core::grade_limits::hue_degrees, L"target hue");
+    double hue_w    = grade_param(ctx.parameters.at(1), core::grade_limits::hue_width, L"hue width");
+    double min_sat  = grade_param(ctx.parameters.at(2), core::grade_limits::unit, L"min saturation");
+    double max_sat  = grade_param(ctx.parameters.at(3), core::grade_limits::unit, L"max saturation");
+    double min_lum  = grade_param(ctx.parameters.at(4), core::grade_limits::unit, L"min luminance");
+    double max_lum  = grade_param(ctx.parameters.at(5), core::grade_limits::unit, L"max luminance");
+    double softness = grade_param(ctx.parameters.at(6), core::grade_limits::unit, L"softness");
+    double exp_off  = grade_param(ctx.parameters.at(7), core::grade_limits::offset, L"exposure offset");
+    double sat_off  = grade_param(ctx.parameters.at(8), core::grade_limits::offset, L"saturation offset");
+    double hue_off  = grade_param(ctx.parameters.at(9), core::grade_limits::hue_shift, L"hue offset");
+    int          duration = ctx.parameters.size() > 10 ? std::stoi(ctx.parameters[10]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 11 ? ctx.parameters[11] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.qualifier_enable = true;
+            transform.image_transform.qual_target_hue  = tgt_hue;
+            transform.image_transform.qual_hue_width   = hue_w;
+            transform.image_transform.qual_min_sat     = min_sat;
+            transform.image_transform.qual_max_sat     = max_sat;
+            transform.image_transform.qual_min_lum     = min_lum;
+            transform.image_transform.qual_max_lum     = max_lum;
+            transform.image_transform.qual_softness    = softness;
+            transform.image_transform.qual_exposure    = exp_off;
+            transform.image_transform.qual_sat_offset  = sat_off;
+            transform.image_transform.qual_hue_offset  = hue_off;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
+std::future<std::wstring> mixer_rgblevels_command(command_context& ctx)
+{
+    if (ctx.parameters.empty()) {
+        auto t2 = get_current_transform(ctx).share();
+        return std::async(std::launch::deferred, [t2]() -> std::wstring {
+            const auto& rl = t2.get().image_transform.per_channel_levels;
+            if (!rl.enable)
+                return L"201 MIXER OK\r\nDISABLED\r\n";
+            auto f   = [](double v) { return std::to_wstring(v); };
+            auto row = [&](const core::rgb_levels_channel& c) {
+                return f(c.min_input) + L" " + f(c.max_input) + L" " + f(c.gamma) + L" " + f(c.min_output) + L" " +
+                       f(c.max_output);
+            };
+            return L"201 MIXER OK\r\n" + row(rl.r) + L" " + row(rl.g) + L" " + row(rl.b) + L"\r\n";
+        });
+    }
+
+    if (boost::iequals(ctx.parameters.at(0), L"RESET")) {
+        transforms_applier transforms(ctx);
+        transforms.add(stage::transform_tuple_t(
+            ctx.layer_index(),
+            [](frame_transform t) {
+                t.image_transform.per_channel_levels = core::rgb_levels{};
+                return t;
+            },
+            0,
+            L"linear"));
+        transforms.apply();
+        return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+    }
+
+    transforms_applier transforms(ctx);
+    grade_require(ctx,
+                  15,
+                  L"MIXER RGBLEVELS rMinIn rMaxIn rGamma rMinOut rMaxOut gMinIn ... "
+                  L"bMaxOut [duration] [tween], or MIXER RGBLEVELS RESET");
+    core::rgb_levels rl;
+    rl.enable       = true;
+    rl.r.min_input  = grade_param(ctx.parameters.at(0), core::grade_limits::level, L"R min input");
+    rl.r.max_input  = grade_param(ctx.parameters.at(1), core::grade_limits::level, L"R max input");
+    rl.r.gamma      = grade_param(ctx.parameters.at(2), core::grade_limits::level_gamma, L"R gamma");
+    rl.r.min_output = grade_param(ctx.parameters.at(3), core::grade_limits::level, L"R min output");
+    rl.r.max_output = grade_param(ctx.parameters.at(4), core::grade_limits::level, L"R max output");
+    rl.g.min_input  = grade_param(ctx.parameters.at(5), core::grade_limits::level, L"G min input");
+    rl.g.max_input  = grade_param(ctx.parameters.at(6), core::grade_limits::level, L"G max input");
+    rl.g.gamma      = grade_param(ctx.parameters.at(7), core::grade_limits::level_gamma, L"G gamma");
+    rl.g.min_output = grade_param(ctx.parameters.at(8), core::grade_limits::level, L"G min output");
+    rl.g.max_output = grade_param(ctx.parameters.at(9), core::grade_limits::level, L"G max output");
+    rl.b.min_input  = grade_param(ctx.parameters.at(10), core::grade_limits::level, L"B min input");
+    rl.b.max_input  = grade_param(ctx.parameters.at(11), core::grade_limits::level, L"B max input");
+    rl.b.gamma      = grade_param(ctx.parameters.at(12), core::grade_limits::level_gamma, L"B gamma");
+    rl.b.min_output = grade_param(ctx.parameters.at(13), core::grade_limits::level, L"B min output");
+    rl.b.max_output = grade_param(ctx.parameters.at(14), core::grade_limits::level, L"B max output");
+    int          duration = ctx.parameters.size() > 15 ? std::stoi(ctx.parameters[15]) : 0;
+    std::wstring tween    = ctx.parameters.size() > 16 ? ctx.parameters[16] : L"linear";
+
+    transforms.add(stage::transform_tuple_t(
+        ctx.layer_index(),
+        [=](frame_transform transform) -> frame_transform {
+            transform.image_transform.per_channel_levels = rl;
+            return transform;
+        },
+        duration,
+        tween));
+    transforms.apply();
+
+    return make_ready_future<std::wstring>(L"202 MIXER OK\r\n");
+}
+
 std::future<std::wstring> mixer_fill_command(command_context& ctx)
 {
     if (ctx.parameters.empty()) {
@@ -2165,6 +2346,9 @@ void register_commands(std::shared_ptr<amcp_command_repository_wrapper>& repo)
     repo->register_channel_command(L"Mixer Commands", L"MIXER GRID", mixer_grid_command, 1);
     repo->register_channel_command(L"Mixer Commands", L"MIXER COMMIT", mixer_commit_command, 0);
     repo->register_channel_command(L"Mixer Commands", L"MIXER CLEAR", mixer_clear_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER GAMUTCOMPRESS", mixer_gamutcompress_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER QUALIFIER", mixer_qualifier_command, 0);
+    repo->register_channel_command(L"Mixer Commands", L"MIXER RGBLEVELS", mixer_rgblevels_command, 0);
     repo->register_command(L"Mixer Commands", L"CHANNEL_GRID", channel_grid_command, 0);
 
     repo->register_command(L"Thumbnail Commands", L"THUMBNAIL LIST", thumbnail_list_command, 0);
