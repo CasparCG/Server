@@ -146,7 +146,11 @@ struct image_consumer : public core::frame_consumer
         return make_ready_future(false);
     }
 
-    std::wstring print() const override { return L"image[]"; }
+    std::wstring print() const override
+    {
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return L"image[" + id_str + L"]";
+    }
 
     std::wstring name() const override { return L"image"; }
 
@@ -156,6 +160,8 @@ struct image_consumer : public core::frame_consumer
     {
         core::monitor::state state;
         state["image/filename"] = u8(filename_);
+        if (!consumer_id().empty())
+            state["image/consumer_id"] = consumer_id();
         return state;
     }
 };

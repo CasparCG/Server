@@ -57,6 +57,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <functional>
 #include <future>
 #include <format>
 #include <memory>
@@ -497,6 +498,12 @@ std::future<std::wstring> apply_command(command_context& ctx)
     });
 }
 
+static int consumer_index_from_id(const std::wstring& id)
+{
+    auto hash = std::hash<std::wstring>{}(id);
+    return 10000000 + static_cast<int>(hash % 10000000);
+}
+
 std::wstring add_command(command_context& ctx)
 {
     replace_placeholders(L"<CLIENT_IP_ADDRESS>", ctx.client->address(), ctx.parameters);
@@ -504,18 +511,42 @@ std::wstring add_command(command_context& ctx)
     core::diagnostics::scoped_call_context save;
     core::diagnostics::call_context::for_thread().video_channel = ctx.channel_index + 1;
 
+    auto consumer_id = get_param(L"ID", ctx.parameters, L"");
+
     auto consumer =
         ctx.static_context->consumer_registry->create_consumer(ctx.parameters,
                                                                ctx.static_context->format_repository,
                                                                get_channels(ctx),
                                                                ctx.channel.raw_channel->get_consumer_channel_info());
-    ctx.channel.raw_channel->output().add(ctx.layer_index(consumer->index()), consumer);
+
+    if (!consumer_id.empty()) {
+        consumer->set_consumer_id(consumer_id);
+    }
+
+    int index;
+    if (ctx.layer_id != -1) {
+        index = ctx.layer_id;
+    } else if (!consumer_id.empty()) {
+        index = consumer_index_from_id(consumer_id);
+    } else {
+        index = consumer->index();
+    }
+
+    ctx.channel.raw_channel->output().add(index, consumer);
 
     return L"202 ADD OK\r\n";
 }
 
 std::wstring remove_command(command_context& ctx)
 {
+    auto consumer_id = get_param(L"ID", ctx.parameters, L"");
+    if (!consumer_id.empty()) {
+        if (!ctx.channel.raw_channel->output().remove_by_id(consumer_id)) {
+            return L"404 REMOVE FAILED\r\n";
+        }
+        return L"202 REMOVE OK\r\n";
+    }
+
     auto index = ctx.layer_index(std::numeric_limits<int>::min());
 
     if (index == std::numeric_limits<int>::min()) {

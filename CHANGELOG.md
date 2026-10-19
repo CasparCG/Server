@@ -70,6 +70,9 @@ CasparCG 2.5.0 Stable
 
 ### Consumers
 ##### Improvements
+* All: Support optional consumer ID via AMCP ADD/REMOVE commands and config.xml. Allows multiple consumers of the same type per channel and removal by ID.
+  - AMCP: `ADD 1 NDI ID "my-id" NAME "Test"` / `REMOVE 1 ID "my-id"`
+  - Config: `<ndi><id>my-id</id><name>Test</name></ndi>`
 * Screen: Set size and position from AMCP
 * Screen: Improve performance
 * Image: Propagate AMCP parameters from PRINT command

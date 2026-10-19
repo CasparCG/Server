@@ -84,6 +84,18 @@ struct output::impl
 
     bool remove(const spl::shared_ptr<frame_consumer>& consumer) { return remove(consumer->index()); }
 
+    bool remove_by_id(const std::wstring& consumer_id)
+    {
+        std::lock_guard<std::mutex> lock(consumers_mutex_);
+        for (auto it = consumers_.begin(); it != consumers_.end(); ++it) {
+            if (it->second->consumer_id() == consumer_id) {
+                consumers_.erase(it);
+                return true;
+            }
+        }
+        return false;
+    }
+
     std::future<bool> call(int index, const std::vector<std::wstring>& params)
     {
         std::lock_guard<std::mutex> lock(consumers_mutex_);
@@ -213,6 +225,9 @@ struct output::impl
         for (auto& p : consumers) {
             state["port"][p.first]             = p.second->state();
             state["port"][p.first]["consumer"] = p.second->name();
+            if (!p.second->consumer_id().empty()) {
+                state["port"][p.first]["consumer_id"] = p.second->consumer_id();
+            }
         }
         state_ = std::move(state);
 
@@ -245,6 +260,7 @@ void output::add(int index, const spl::shared_ptr<frame_consumer>& consumer) { i
 void output::add(const spl::shared_ptr<frame_consumer>& consumer) { impl_->add(consumer); }
 bool output::remove(int index) { return impl_->remove(index); }
 bool output::remove(const spl::shared_ptr<frame_consumer>& consumer) { return impl_->remove(consumer); }
+bool output::remove_by_id(const std::wstring& consumer_id) { return impl_->remove_by_id(consumer_id); }
 std::future<bool> output::call(int index, const std::vector<std::wstring>& params)
 {
     return impl_->call(index, params);

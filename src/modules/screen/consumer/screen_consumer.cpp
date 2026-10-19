@@ -764,7 +764,11 @@ struct screen_consumer_proxy : public core::frame_consumer
         return consumer_->send(field, frame);
     }
 
-    std::wstring print() const override { return consumer_ ? consumer_->print() : L"[screen_consumer]"; }
+    std::wstring print() const override
+    {
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return consumer_ ? consumer_->print() + id_str : L"[screen_consumer" + id_str + L"]";
+    }
 
     std::wstring name() const override { return L"screen"; }
 
@@ -779,6 +783,8 @@ struct screen_consumer_proxy : public core::frame_consumer
         state["screen/index"]         = config_.screen_index;
         state["screen/key_only"]      = config_.key_only;
         state["screen/always_on_top"] = config_.always_on_top;
+        if (!consumer_id().empty())
+            state["screen/consumer_id"] = consumer_id();
         return state;
     }
 };

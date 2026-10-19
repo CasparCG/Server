@@ -152,7 +152,11 @@ struct artnet_consumer : public core::frame_consumer
         return make_ready_future(true);
     }
 
-    std::wstring print() const override { return L"artnet[]"; }
+    std::wstring print() const override
+    {
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return L"artnet[" + id_str + L"]";
+    }
 
     std::wstring name() const override { return L"artnet"; }
 
@@ -167,6 +171,8 @@ struct artnet_consumer : public core::frame_consumer
         state["artnet/host"]              = config.host;
         state["artnet/port"]              = config.port;
         state["artnet/refresh-rate"]      = config.refreshRate;
+        if (!consumer_id().empty())
+            state["artnet/consumer_id"] = consumer_id();
 
         return state;
     }

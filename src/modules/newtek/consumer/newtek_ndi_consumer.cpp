@@ -288,10 +288,11 @@ struct newtek_ndi_consumer : public core::frame_consumer
 
     std::wstring print() const override
     {
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
         if (channel_index_) {
-            return L"ndi_consumer[" + boost::lexical_cast<std::wstring>(channel_index_) + L"|" + name_ + L"]";
+            return L"ndi_consumer[" + boost::lexical_cast<std::wstring>(channel_index_) + L"|" + name_ + id_str + L"]";
         } else {
-            return L"[ndi_consumer]";
+            return L"[ndi_consumer" + id_str + L"]";
         }
     }
 
@@ -314,6 +315,8 @@ struct newtek_ndi_consumer : public core::frame_consumer
         state["ndi/use_advertiser"]       = use_advertiser_;
         state["ndi/allow_monitoring"]     = allow_monitoring_;
         state["ndi/discovery_server_url"] = discovery_server_url_;
+        if (!consumer_id().empty())
+            state["ndi/consumer_id"] = consumer_id();
         return state;
     }
 };

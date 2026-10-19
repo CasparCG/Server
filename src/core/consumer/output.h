@@ -28,6 +28,7 @@
 #include <core/video_format.h>
 
 #include <memory>
+#include <string>
 
 namespace caspar::diagnostics {
 class graph;
@@ -53,6 +54,7 @@ class output final
     void add(int index, const spl::shared_ptr<frame_consumer>& consumer);
     bool remove(const spl::shared_ptr<frame_consumer>& consumer);
     bool remove(int index);
+    bool remove_by_id(const std::wstring& consumer_id);
 
     std::future<bool> call(int index, const std::vector<std::wstring>& params);
 

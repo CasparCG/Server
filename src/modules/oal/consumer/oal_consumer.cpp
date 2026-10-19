@@ -356,7 +356,8 @@ struct oal_consumer : public core::frame_consumer
 
     std::wstring print() const override
     {
-        return L"oal[" + std::to_wstring(channel_index_) + L"|" + format_desc_.name + L"]";
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return L"oal[" + std::to_wstring(channel_index_) + L"|" + format_desc_.name + id_str + L"]";
     }
 
     std::wstring name() const override { return L"system-audio"; }
@@ -367,8 +368,10 @@ struct oal_consumer : public core::frame_consumer
 
     core::monitor::state state() const override
     {
-        static const core::monitor::state empty;
-        return empty;
+        core::monitor::state state;
+        if (!consumer_id().empty())
+            state["system-audio/consumer_id"] = consumer_id();
+        return state;
     }
 };
 

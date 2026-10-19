@@ -662,7 +662,11 @@ struct ffmpeg_consumer : public core::frame_consumer
         return make_ready_future(true);
     }
 
-    std::wstring print() const override { return L"ffmpeg[" + u16(path_) + L"]"; }
+    std::wstring print() const override
+    {
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return L"ffmpeg[" + u16(path_) + id_str + L"]";
+    }
 
     std::wstring name() const override { return L"ffmpeg"; }
 
@@ -673,7 +677,10 @@ struct ffmpeg_consumer : public core::frame_consumer
     core::monitor::state state() const override
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
-        return state_;
+        auto                        s = state_;
+        if (!consumer_id().empty())
+            s["file/consumer_id"] = consumer_id();
+        return s;
     }
 };
 

@@ -101,6 +101,11 @@ class destroy_consumer_proxy : public frame_consumer
     bool                 has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
     int                  index() const override { return consumer_->index(); }
     core::monitor::state state() const override { return consumer_->state(); }
+    void set_consumer_id(const std::wstring& id) override
+    {
+        frame_consumer::set_consumer_id(id);
+        consumer_->set_consumer_id(id);
+    }
 };
 
 class print_consumer_proxy : public frame_consumer
@@ -137,6 +142,11 @@ class print_consumer_proxy : public frame_consumer
     bool                 has_synchronization_clock() const override { return consumer_->has_synchronization_clock(); }
     int                  index() const override { return consumer_->index(); }
     core::monitor::state state() const override { return consumer_->state(); }
+    void set_consumer_id(const std::wstring& id) override
+    {
+        frame_consumer::set_consumer_id(id);
+        consumer_->set_consumer_id(id);
+    }
 };
 
 frame_consumer_registry::frame_consumer_registry() {}

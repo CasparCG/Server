@@ -58,6 +58,7 @@
 #include <boost/format.hpp>
 #include <boost/property_tree/ptree.hpp>
 
+#include <functional>
 #include <thread>
 #include <utility>
 
@@ -394,13 +395,24 @@ struct server::impl
                     auto name = xml_consumer.first;
 
                     try {
-                        if (name != L"<xmlcomment>")
-                            channel.raw_channel->output().add(
+                        if (name != L"<xmlcomment>") {
+                            auto consumer =
                                 consumer_registry_->create_consumer(name,
                                                                     xml_consumer.second,
                                                                     video_format_repository_,
                                                                     channels_vec,
-                                                                    channel.raw_channel->get_consumer_channel_info()));
+                                                                    channel.raw_channel->get_consumer_channel_info());
+
+                            auto id = xml_consumer.second.get(L"id", L"");
+                            if (!id.empty()) {
+                                consumer->set_consumer_id(id);
+                                auto hash = std::hash<std::wstring>{}(id);
+                                int  index = 10000000 + static_cast<int>(hash % 10000000);
+                                channel.raw_channel->output().add(index, consumer);
+                            } else {
+                                channel.raw_channel->output().add(consumer);
+                            }
+                        }
                     } catch (...) {
                         CASPAR_LOG_CURRENT_EXCEPTION();
                     }

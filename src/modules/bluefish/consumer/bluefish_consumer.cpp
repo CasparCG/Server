@@ -866,7 +866,11 @@ struct bluefish_consumer_proxy : public core::frame_consumer
         return executor_.begin_invoke([=, this] { return consumer_->send(field, frame); });
     }
 
-    std::wstring print() const override { return consumer_ ? consumer_->print() : L"[bluefish_consumer]"; }
+    std::wstring print() const override
+    {
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return consumer_ ? consumer_->print() + id_str : L"[bluefish_consumer" + id_str + L"]";
+    }
 
     std::wstring name() const override { return L"bluefish"; }
 
@@ -880,6 +884,8 @@ struct bluefish_consumer_proxy : public core::frame_consumer
         state["bluefish/index"]          = config_.device_index;
         state["bluefish/stream"]         = static_cast<unsigned int>(config_.device_stream);
         state["bluefish/embedded_audio"] = config_.embedded_audio;
+        if (!consumer_id().empty())
+            state["bluefish/consumer_id"] = consumer_id();
         return state;
     }
 };

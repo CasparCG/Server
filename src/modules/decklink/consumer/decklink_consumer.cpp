@@ -1210,7 +1210,8 @@ struct decklink_consumer_proxy : public core::frame_consumer
 
     [[nodiscard]] std::wstring print() const override
     {
-        return consumer_ ? consumer_->print() : L"[decklink_consumer]";
+        auto id_str = consumer_id().empty() ? L"" : L"|id=" + consumer_id();
+        return consumer_ ? consumer_->print() + id_str : L"[decklink_consumer" + id_str + L"]";
     }
 
     [[nodiscard]] std::wstring name() const override { return L"decklink"; }
@@ -1219,7 +1220,13 @@ struct decklink_consumer_proxy : public core::frame_consumer
 
     [[nodiscard]] bool has_synchronization_clock() const override { return true; }
 
-    [[nodiscard]] core::monitor::state state() const override { return get_state_for_config(config_, format_desc_); }
+    [[nodiscard]] core::monitor::state state() const override
+    {
+        auto state = get_state_for_config(config_, format_desc_);
+        if (!consumer_id().empty())
+            state["decklink/consumer_id"] = consumer_id();
+        return state;
+    }
 };
 
 spl::shared_ptr<core::frame_consumer> create_consumer(const std::vector<std::wstring>&     params,
