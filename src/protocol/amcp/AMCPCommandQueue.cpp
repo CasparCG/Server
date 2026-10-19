@@ -39,6 +39,40 @@ AMCPCommandQueue::AMCPCommandQueue(const std::wstring&                          
 
 AMCPCommandQueue::~AMCPCommandQueue() {}
 
+/// Maps the exception currently being handled onto an AMCP failure reply. Call from inside
+/// a catch block.
+///
+/// This mapping used to be written out inline, once, around `cmd->Execute(...)` — which is
+/// only half the places a command can fail. A command whose future is deferred, as CALL's
+/// is, does its work when the reply lambda calls `res.get()`, long after that try block has
+/// been left, and an exception there reached nobody: no reply, no log, and a client waiting
+/// forever for an answer to a command it had already been told nothing about. One mapping,
+/// used by both paths, is what stops them diverging again.
+void send_failure_reply(const std::shared_ptr<AMCPCommand>& cmd, bool reply_without_req_id)
+{
+    try {
+        throw;
+    } catch (file_not_found&) {
+        CASPAR_LOG(error) << " File not found.";
+        cmd->SendReply(L"404 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (expected_user_error&) {
+        cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (user_error&) {
+        CASPAR_LOG(error) << " Check syntax.";
+        cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (std::out_of_range&) {
+        CASPAR_LOG(error) << L"Missing parameter. Check syntax.";
+        cmd->SendReply(L"402 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (boost::bad_lexical_cast&) {
+        CASPAR_LOG(error) << L"Invalid parameter. Check syntax.";
+        cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    } catch (...) {
+        CASPAR_LOG_CURRENT_EXCEPTION();
+        CASPAR_LOG(error) << "Failed to execute command: " << cmd->name();
+        cmd->SendReply(L"501 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+    }
+}
+
 std::future<bool> exec_cmd(std::shared_ptr<AMCPCommand>                         cmd,
                            const spl::shared_ptr<std::vector<channel_context>>& channels,
                            bool                                                 reply_without_req_id)
@@ -52,32 +86,22 @@ std::future<bool> exec_cmd(std::shared_ptr<AMCPCommand>                         
 
             auto res = cmd->Execute(channels).share();
             return std::async(std::launch::async, [cmd, res, reply_without_req_id, timer, name]() -> bool {
-                cmd->SendReply(res.get(), reply_without_req_id);
+                try {
+                    cmd->SendReply(res.get(), reply_without_req_id);
+                } catch (...) {
+                    // Where a deferred command — CALL — actually fails. Without this the
+                    // reply never goes out at all.
+                    send_failure_reply(cmd, reply_without_req_id);
+                    return false;
+                }
 
                 CASPAR_LOG(debug) << "Executed command (" << timer.elapsed() << "s): " << name;
                 return true;
             });
 
-        } catch (file_not_found&) {
-            CASPAR_LOG(error) << " File not found.";
-            cmd->SendReply(L"404 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
-        } catch (expected_user_error&) {
-            cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
-        } catch (user_error&) {
-            CASPAR_LOG(error) << " Check syntax.";
-            cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
-        } catch (std::out_of_range&) {
-            CASPAR_LOG(error) << L"Missing parameter. Check syntax.";
-            cmd->SendReply(L"402 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
-        } catch (boost::bad_lexical_cast&) {
-            CASPAR_LOG(error) << L"Invalid parameter. Check syntax.";
-            cmd->SendReply(L"403 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
         } catch (...) {
-            CASPAR_LOG_CURRENT_EXCEPTION();
-            CASPAR_LOG(error) << "Failed to execute command: " << cmd->name();
-            cmd->SendReply(L"501 " + cmd->name() + L" FAILED\r\n", reply_without_req_id);
+            send_failure_reply(cmd, reply_without_req_id);
         }
-
     } catch (...) {
         CASPAR_LOG_CURRENT_EXCEPTION();
     }
