@@ -86,6 +86,7 @@ struct image_kernel::impl
     spl::shared_ptr<shader> shader_;
     GLuint                  vao_;
     GLuint                  vbo_;
+    int                     frame_counter_ = 0;
 
     explicit impl(const spl::shared_ptr<device>& ogl)
         : ogl_(ogl)
@@ -245,6 +246,50 @@ struct image_kernel::impl
                          transforms.image_transform.chroma.spill_suppress_saturation);
         } else {
             shader_->set("chroma", false);
+        }
+
+        // Blur
+        if (transforms.image_transform.blur.enable) {
+            shader_->set("blur_enable", true);
+            shader_->set("blur_radius", static_cast<float>(transforms.image_transform.blur.radius));
+            shader_->set("blur_type", static_cast<int>(transforms.image_transform.blur.type));
+            shader_->set("blur_angle", static_cast<float>(transforms.image_transform.blur.angle));
+            shader_->set("blur_center",
+                         static_cast<float>(transforms.image_transform.blur.center[0]),
+                         static_cast<float>(transforms.image_transform.blur.center[1]));
+            shader_->set("blur_tilt",
+                         static_cast<float>(transforms.image_transform.blur.tilt_y),
+                         static_cast<float>(transforms.image_transform.blur.tilt_h));
+            shader_->set("target_size",
+                         static_cast<float>(params.target_width),
+                         static_cast<float>(params.target_height));
+        } else {
+            shader_->set("blur_enable", false);
+        }
+
+        // Sharpen
+        if (std::abs(transforms.image_transform.sharpen_amount) > epsilon) {
+            shader_->set("sharpen_enable", true);
+            shader_->set("sharpen_amount", static_cast<float>(transforms.image_transform.sharpen_amount));
+            shader_->set("sharpen_radius", static_cast<float>(transforms.image_transform.sharpen_radius));
+            shader_->set("target_size",
+                         static_cast<float>(params.target_width),
+                         static_cast<float>(params.target_height));
+        } else {
+            shader_->set("sharpen_enable", false);
+        }
+
+        // Film grain
+        if (std::abs(transforms.image_transform.grain_intensity) > epsilon) {
+            shader_->set("grain_enable", true);
+            shader_->set("grain_intensity", static_cast<float>(transforms.image_transform.grain_intensity));
+            shader_->set("grain_size", static_cast<float>(transforms.image_transform.grain_size));
+            shader_->set("grain_frame", frame_counter_++);
+            shader_->set("target_size",
+                         static_cast<float>(params.target_width),
+                         static_cast<float>(params.target_height));
+        } else {
+            shader_->set("grain_enable", false);
         }
 
         // Setup blend_func

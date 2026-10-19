@@ -77,6 +77,22 @@ uniform vec3		cdl_slope;
 uniform vec3		cdl_offset;
 uniform vec3		cdl_power;
 uniform float		cdl_saturation;
+uniform bool		blur_enable;
+uniform float		blur_radius;
+uniform int			blur_type; // 0=gaussian, 1=box, 2=directional, 3=zoom, 4=tilt_shift, 5=lens
+uniform float		blur_angle;
+uniform vec2		blur_center;
+uniform vec2		blur_tilt;
+uniform vec2		target_size;
+
+uniform bool		sharpen_enable;
+uniform float		sharpen_amount;
+uniform float		sharpen_radius;
+
+uniform bool		grain_enable;
+uniform float		grain_intensity;
+uniform float		grain_size;
+uniform int			grain_frame; // animated per frame for temporal variation
 
 /*
 ** Contrast, saturation, brightness
@@ -490,64 +506,64 @@ vec4 get_sample(sampler2D sampler, vec2 coords)
     return texture(sampler, coords);
 }
 
-vec4 get_rgba_color()
+vec4 get_rgba_color(vec2 uv)
 {
     switch(pixel_format)
     {
     case 0:		//gray
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rrr * precision_factor[0], 1.0);
+        return vec4(get_sample(plane[0], uv).rrr * precision_factor[0], 1.0);
     case 1:		//bgra,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).bgra * precision_factor[0];
+        return get_sample(plane[0], uv).bgra * precision_factor[0];
     case 2:		//rgba,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).rgba * precision_factor[0];
+        return get_sample(plane[0], uv).rgba * precision_factor[0];
     case 3:		//argb,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).argb * precision_factor[0];
+        return get_sample(plane[0], uv).argb * precision_factor[0];
     case 4:		//abgr,
-        return get_sample(plane[0], TexCoord.st / TexCoord.q).gbar * precision_factor[0];
+        return get_sample(plane[0], uv).gbar * precision_factor[0];
     case 5:		//ycbcr,
         {
-            float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float y  = get_sample(plane[0], uv).r * precision_factor[0];
+            float cb = get_sample(plane[1], uv).r * precision_factor[1];
+            float cr = get_sample(plane[2], uv).r * precision_factor[2];
             return ycbcra_to_rgba(y, cb, cr, 1.0);
         }
     case 6:		//ycbcra
         {
-            float y  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float cr = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
-            float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
+            float y  = get_sample(plane[0], uv).r * precision_factor[0];
+            float cb = get_sample(plane[1], uv).r * precision_factor[1];
+            float cr = get_sample(plane[2], uv).r * precision_factor[2];
+            float a  = get_sample(plane[3], uv).r * precision_factor[3];
             return ycbcra_to_rgba(y, cb, cr, a);
         }
     case 7:		//luma
         {
-            vec3 y3 = get_sample(plane[0], TexCoord.st / TexCoord.q).rrr * precision_factor[0];
+            vec3 y3 = get_sample(plane[0], uv).rrr * precision_factor[0];
             return vec4((y3-0.065)/0.859, 1.0);
         }
     case 8:		//bgr,
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).bgr * precision_factor[0], 1.0);
+        return vec4(get_sample(plane[0], uv).bgr * precision_factor[0], 1.0);
     case 9:		//rgb,
-        return vec4(get_sample(plane[0], TexCoord.st / TexCoord.q).rgb * precision_factor[0], 1.0);
+        return vec4(get_sample(plane[0], uv).rgb * precision_factor[0], 1.0);
 	case 10:	// uyvy
 		{
-			float y = get_sample(plane[0], TexCoord.st / TexCoord.q).g * precision_factor[0];
-			float cb = get_sample(plane[1], TexCoord.st / TexCoord.q).b * precision_factor[1];
-			float cr = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
+			float y = get_sample(plane[0], uv).g * precision_factor[0];
+			float cb = get_sample(plane[1], uv).b * precision_factor[1];
+			float cr = get_sample(plane[1], uv).r * precision_factor[1];
 			return ycbcra_to_rgba(y, cb, cr, 1.0);
 		}
     case 11:    // gbrp
         {
-            float g  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float b = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float r = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
+            float g  = get_sample(plane[0], uv).r * precision_factor[0];
+            float b = get_sample(plane[1], uv).r * precision_factor[1];
+            float r = get_sample(plane[2], uv).r * precision_factor[2];
 			return vec4(b, g, r, 1.0);
         }
     case 12:    // gbrap
         {
-            float g  = get_sample(plane[0], TexCoord.st / TexCoord.q).r * precision_factor[0];
-            float b = get_sample(plane[1], TexCoord.st / TexCoord.q).r * precision_factor[1];
-            float r = get_sample(plane[2], TexCoord.st / TexCoord.q).r * precision_factor[2];
-            float a  = get_sample(plane[3], TexCoord.st / TexCoord.q).r * precision_factor[3];
+            float g  = get_sample(plane[0], uv).r * precision_factor[0];
+            float b = get_sample(plane[1], uv).r * precision_factor[1];
+            float r = get_sample(plane[2], uv).r * precision_factor[2];
+            float a  = get_sample(plane[3], uv).r * precision_factor[3];
 			return vec4(b, g, r, a);
         }
     }
@@ -664,9 +680,148 @@ vec3 apply_cdl(vec3 c, vec3 slope, vec3 off, vec3 pwr, float sat_val)
     return c;
 }
 
+vec4 get_blurred_color(vec2 uv)
+{
+    if (!blur_enable || blur_radius < 0.5)
+        return get_rgba_color(uv);
+
+    vec2  texelSize   = 1.0 / target_size;
+    vec4  totalColor  = vec4(0.0);
+    float totalWeight = 0.0;
+
+    // GAUSSIAN BLUR (2D spiral with Gaussian weights)
+    if (blur_type == 0)
+    {
+        int   iSamples = int(clamp(blur_radius * 3.0, 16.0, 120.0));
+        float sigma    = blur_radius / 2.0;
+        for (int i = 0; i < iSamples; i++) {
+            float t      = float(i) / max(float(iSamples - 1), 1.0);
+            float radius = sqrt(t) * blur_radius;
+            float theta  = float(i) * 2.39996323; // golden angle
+            vec2  offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
+            float weight = exp(-(radius * radius) / (2.0 * sigma * sigma));
+            totalColor  += get_rgba_color(uv + offset) * weight;
+            totalWeight += weight;
+        }
+    }
+    // BOX BLUR
+    else if (blur_type == 1)
+    {
+        int   steps    = min(int(blur_radius), 6);
+        float stepSize = blur_radius / max(float(steps), 1.0);
+        for (int y = -steps; y <= steps; y++) {
+            for (int x = -steps; x <= steps; x++) {
+                vec2 offset = vec2(float(x), float(y)) * stepSize * texelSize;
+                totalColor  += get_rgba_color(uv + offset);
+                totalWeight += 1.0;
+            }
+        }
+    }
+    // DIRECTIONAL BLUR (motion blur)
+    else if (blur_type == 2)
+    {
+        float angleRad = radians(blur_angle);
+        vec2  dir      = vec2(cos(angleRad), sin(angleRad));
+        int   iSamples = int(clamp(blur_radius * 2.0, 16.0, 100.0));
+        for (int i = 0; i < iSamples; i++) {
+            float t      = (float(i) / max(float(iSamples - 1), 1.0)) - 0.5;
+            vec2  offset = dir * (t * blur_radius * 2.0 * texelSize);
+            totalColor  += get_rgba_color(uv + offset);
+            totalWeight += 1.0;
+        }
+    }
+    // ZOOM BLUR
+    else if (blur_type == 3)
+    {
+        vec2  center   = blur_center;
+        vec2  toPixel  = uv - center;
+        float strength = blur_radius * 0.01;
+        int   iSamples = int(clamp(blur_radius * 2.0, 16.0, 100.0));
+        for (int i = 0; i < iSamples; i++) {
+            float scale  = 1.0 - strength * (float(i) / max(float(iSamples - 1), 1.0));
+            totalColor  += get_rgba_color(center + toPixel * scale);
+            totalWeight += 1.0;
+        }
+    }
+    // TILT-SHIFT
+    else if (blur_type == 4)
+    {
+        float angleRad    = radians(blur_angle);
+        vec2  normal      = vec2(sin(angleRad), cos(angleRad));
+        float dist        = abs(dot(uv - blur_center, normal) - (blur_tilt.x - 0.5));
+        float focus_width = blur_tilt.y;
+        float blurAmount  = smoothstep(focus_width * 0.5, focus_width * 0.5 + 0.2, dist) * blur_radius;
+        if (blurAmount < 0.5)
+            return get_rgba_color(uv);
+        int iSamples = int(clamp(blurAmount * 2.0, 16.0, 100.0));
+        for (int i = 0; i < iSamples; i++) {
+            float t      = float(i) / max(float(iSamples - 1), 1.0);
+            float radius = sqrt(t) * blurAmount;
+            float theta  = float(i) * 2.39996323;
+            vec2  offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
+            totalColor  += get_rgba_color(uv + offset);
+            totalWeight += 1.0;
+        }
+    }
+    // LENS (cinematic bokeh)
+    else if (blur_type == 5)
+    {
+        float noise        = fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453);
+        float dither_theta = noise * 6.2831853;
+        int   iSamples     = int(clamp(blur_radius * 8.0, 32.0, 400.0));
+        for (int i = 0; i < iSamples; i++) {
+            float t      = float(i) / max(float(iSamples - 1), 1.0);
+            float radius = sqrt(t) * blur_radius;
+            float theta  = dither_theta + float(i) * 2.39996323;
+            vec2  offset = vec2(cos(theta), sin(theta)) * radius * texelSize;
+            vec4  col    = get_rgba_color(uv + offset);
+            float lum    = working_luma(col.rgb);
+            float weight = 1.0 + pow(max(lum - 0.3, 0.0), 3.0) * 15.0;
+            weight      *= mix(0.3, 1.0, t);
+            totalColor  += col * weight;
+            totalWeight += weight;
+        }
+    }
+
+    if (totalWeight > 0.0)
+        return totalColor / totalWeight;
+    return get_rgba_color(uv);
+}
+
+vec3 apply_sharpen(vec2 uv, vec3 center_col, float amount, float rad)
+{
+    vec2 ts = 1.0 / target_size * rad;
+    vec3 n  = get_rgba_color(uv + vec2( 0.0, -ts.y)).rgb;
+    vec3 s  = get_rgba_color(uv + vec2( 0.0,  ts.y)).rgb;
+    vec3 e  = get_rgba_color(uv + vec2( ts.x,  0.0)).rgb;
+    vec3 w  = get_rgba_color(uv + vec2(-ts.x,  0.0)).rgb;
+    vec3 blur_avg = (n + s + e + w) * 0.25;
+    return center_col + (center_col - blur_avg) * amount;
+}
+
+float grain_hash(vec2 p, int frame_seed)
+{
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + float(frame_seed) * 0.00137);
+    return fract((p3.x + p3.y) * p3.z);
+}
+
+vec3 apply_film_grain(vec3 c, vec2 uv, float intensity, float size_val, int frame_seed)
+{
+    vec2  grain_uv = uv * target_size / max(size_val, 0.5);
+    float noise    = grain_hash(grain_uv, frame_seed) * 2.0 - 1.0; // -1..+1
+    float lum      = working_luma(c);
+    float response = smoothstep(0.0, 0.15, lum) * (1.0 - smoothstep(0.8, 1.0, lum));
+    c += vec3(noise * intensity * response);
+    return c;
+}
+
 void main()
 {
-    vec4 color = get_rgba_color();
+    vec2 uv    = TexCoord.st / TexCoord.q;
+    vec4 color = get_blurred_color(uv);
+    if (sharpen_enable)
+        color.rgb = apply_sharpen(uv, color.rgb, sharpen_amount, sharpen_radius);
     if (is_straight_alpha)
         color.rgb *= color.a;
     if (chroma)
@@ -699,5 +854,7 @@ void main()
         color = 1.0 - color;
     if (blend_mode >= 0)
         color = blend(color);
+    if (grain_enable)
+        color.rgb = apply_film_grain(color.rgb, uv, grain_intensity, grain_size, grain_frame);
     fragColor = color.bgra;
 }

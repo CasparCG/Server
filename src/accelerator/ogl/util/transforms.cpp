@@ -140,6 +140,20 @@ void apply_transform_colour_values(core::image_transform& self, const core::imag
         self.cdl_power[i]  = lim::cdl_power.clamp(self.cdl_power[i] * other.cdl_power[i]);
     }
     self.cdl_saturation = lim::cdl_saturation.clamp(self.cdl_saturation * other.cdl_saturation);
+
+    if (other.blur.enable) {
+        self.blur = other.blur;
+    }
+
+    // Shape parameters come from whichever transform has the effect on, not from a
+    // float comparison against their default.
+    self.sharpen_amount = lim::sharpen_amount.clamp(self.sharpen_amount + other.sharpen_amount);
+    if (other.sharpen_amount != 0.0)
+        self.sharpen_radius = lim::sharpen_radius.clamp(other.sharpen_radius);
+
+    self.grain_intensity = lim::grain_intensity.clamp(self.grain_intensity + other.grain_intensity);
+    if (other.grain_intensity != 0.0)
+        self.grain_size = lim::grain_size.clamp(other.grain_size);
 }
 
 bool is_default_perspective(const core::corners& perspective)

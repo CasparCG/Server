@@ -125,7 +125,39 @@ inline constexpr grade_range cdl_offset{-1.0, 1.0};
 inline constexpr grade_range cdl_power{0.01, 10.0};
 inline constexpr grade_range cdl_saturation{0.0, 10.0};
 
+/// Blur radius is in output pixels; the bound stops a typo stalling a layer.
+/// Normalised position or fraction of the frame.
+inline constexpr grade_range unit{0.0, 1.0};
+inline constexpr grade_range blur_radius{0.0, 200.0};
+inline constexpr grade_range blur_angle{-360.0, 360.0};
+inline constexpr grade_range sharpen_amount{0.0, 5.0};
+/// Multiplier on the texel step; 0 would sample the centre four times.
+inline constexpr grade_range sharpen_radius{0.1, 10.0};
+inline constexpr grade_range grain_intensity{0.0, 1.0};
+/// The shader floors this at 0.5 when dividing by it.
+inline constexpr grade_range grain_size{0.5, 10.0};
+
 } // namespace grade_limits
+enum class blur_type : int
+{
+    gaussian    = 0,
+    box         = 1,
+    directional = 2,
+    zoom        = 3,
+    tilt_shift  = 4,
+    lens        = 5
+};
+
+struct blur_config final
+{
+    bool                  enable = false;
+    double                radius = 0.0;
+    blur_type             type   = blur_type::gaussian;
+    double                angle  = 0.0;
+    std::array<double, 2> center = {0.5, 0.5};
+    double                tilt_y = 0.5;
+    double                tilt_h = 0.2;
+};
 
 struct image_transform final
 {
@@ -165,6 +197,11 @@ struct image_transform final
     std::array<double, 3> cdl_offset     = {0.0, 0.0, 0.0}; // ASC CDL offset
     std::array<double, 3> cdl_power      = {1.0, 1.0, 1.0}; // ASC CDL power
     double                cdl_saturation = 1.0;             // ASC CDL saturation
+    core::blur_config     blur;
+    double                sharpen_amount = 0.0;
+    double                sharpen_radius = 1.0;
+    double                grain_intensity = 0.0;
+    double                grain_size      = 1.0;
 
     bool             is_key      = false;
     bool             invert      = false;
