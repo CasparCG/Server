@@ -43,96 +43,26 @@
 #include <alloca.h>
 #endif
 
-#include "OscHostEndianness.h"
-
 namespace osc {
 
 static void FromInt32(char* p, int32_t x)
 {
-#ifdef OSC_HOST_LITTLE_ENDIAN
-    /*union{
-        osc::int32_t i;
-        char c[4];
-    } u;
-
-    u.i = x;
-
-    p[3] = u.c[0];
-    p[2] = u.c[1];
-    p[1] = u.c[2];
-    p[0] = u.c[3];*/
-    *reinterpret_cast<int32_t*>(p) = caspar::swap_byte_order(x);
-#else
-    *reinterpret_cast<int32_t*>(p) = x;
-#endif
+    *reinterpret_cast<int32_t*>(p) = caspar::big_endian(x);
 }
 
 static void FromUInt32(char* p, uint32_t x)
 {
-#ifdef OSC_HOST_LITTLE_ENDIAN
-    /*union{
-        osc::uint32_t i;
-        char c[4];
-    } u;
-
-    u.i = x;
-
-    p[3] = u.c[0];
-    p[2] = u.c[1];
-    p[1] = u.c[2];
-    p[0] = u.c[3];*/
-    *reinterpret_cast<uint32_t*>(p) = caspar::swap_byte_order(x);
-#else
-    *reinterpret_cast<uint32_t*>(p) = x;
-#endif
+    *reinterpret_cast<uint32_t*>(p) = caspar::big_endian(x);
 }
 
 static void FromInt64(char* p, int64_t x)
 {
-#ifdef OSC_HOST_LITTLE_ENDIAN
-    /*union{
-        osc::int64_t i;
-        char c[8];
-    } u;
-
-    u.i = x;
-
-    p[7] = u.c[0];
-    p[6] = u.c[1];
-    p[5] = u.c[2];
-    p[4] = u.c[3];
-    p[3] = u.c[4];
-    p[2] = u.c[5];
-    p[1] = u.c[6];
-    p[0] = u.c[7];*/
-    *reinterpret_cast<int64_t*>(p) = caspar::swap_byte_order(x);
-#else
-    *reinterpret_cast<int64_t*>(p) = x;
-#endif
+    *reinterpret_cast<int64_t*>(p) = caspar::big_endian(x);
 }
 
 static void FromUInt64(char* p, uint64_t x)
 {
-#ifdef OSC_HOST_LITTLE_ENDIAN
-    /*union{
-        osc::uint64_t i;
-        char c[8];
-    } u;
-
-    u.i = x;
-
-    p[7] = u.c[0];
-    p[6] = u.c[1];
-    p[5] = u.c[2];
-    p[4] = u.c[3];
-    p[3] = u.c[4];
-    p[2] = u.c[5];
-    p[1] = u.c[6];
-    p[0] = u.c[7];*/
-    *reinterpret_cast<uint64_t*>(p) = caspar::swap_byte_order(x);
-#else
-    *reinterpret_cast<uint64_t*>(p) = x;
-#endif
+    *reinterpret_cast<uint64_t*>(p) = caspar::big_endian(x);
 }
 
 static inline long RoundUp4(long x) { return (x - 1 & ~0x03L) + 4; }
