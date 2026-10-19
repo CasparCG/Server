@@ -41,10 +41,12 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <deque>
 #include <iomanip>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <sstream>
 #include <string>
@@ -545,80 +547,44 @@ struct Filter
         }
 
         if (media_type == AVMEDIA_TYPE_VIDEO) {
-            sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out"));
-
-            const AVPixelFormat pix_fmts[] = {AV_PIX_FMT_RGB24,
-                                              AV_PIX_FMT_BGR24,
-                                              AV_PIX_FMT_BGRA,
-                                              AV_PIX_FMT_ARGB,
-                                              AV_PIX_FMT_RGBA,
-                                              AV_PIX_FMT_ABGR,
-                                              AV_PIX_FMT_YUV444P,
-                                              AV_PIX_FMT_YUV444P10,
-                                              AV_PIX_FMT_YUV444P12,
-                                              AV_PIX_FMT_YUV422P,
-                                              AV_PIX_FMT_YUV422P10,
-                                              AV_PIX_FMT_YUV422P12,
-                                              AV_PIX_FMT_YUV420P,
-                                              AV_PIX_FMT_YUV420P10,
-                                              AV_PIX_FMT_YUV420P12,
-                                              AV_PIX_FMT_YUV410P,
-                                              AV_PIX_FMT_YUVA444P,
-                                              AV_PIX_FMT_YUVA422P,
-                                              AV_PIX_FMT_YUVA420P,
-                                              AV_PIX_FMT_UYVY422,
-                                              // bwdif needs planar rgb
-                                              AV_PIX_FMT_GBRP,
-                                              AV_PIX_FMT_GBRP10,
-                                              AV_PIX_FMT_GBRP12,
-                                              AV_PIX_FMT_GBRP16,
-                                              AV_PIX_FMT_GBRAP,
-                                              AV_PIX_FMT_GBRAP16,
-                                              AV_PIX_FMT_NONE};
-#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
-            FF(av_opt_set_array(sink,
-                                "pixel_formats",
-                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                                0,
-                                FF_ARRAY_ELEMS(pix_fmts) - 1,
-                                AV_OPT_TYPE_PIXEL_FMT,
-                                pix_fmts));
-#else
-            FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
-#endif
+            sink = create_buffersink(graph.get(),
+                                     "out",
+                                     std::array{
+                                         AV_PIX_FMT_RGB24,
+                                         AV_PIX_FMT_BGR24,
+                                         AV_PIX_FMT_BGRA,
+                                         AV_PIX_FMT_ARGB,
+                                         AV_PIX_FMT_RGBA,
+                                         AV_PIX_FMT_ABGR,
+                                         AV_PIX_FMT_YUV444P,
+                                         AV_PIX_FMT_YUV444P10,
+                                         AV_PIX_FMT_YUV444P12,
+                                         AV_PIX_FMT_YUV422P,
+                                         AV_PIX_FMT_YUV422P10,
+                                         AV_PIX_FMT_YUV422P12,
+                                         AV_PIX_FMT_YUV420P,
+                                         AV_PIX_FMT_YUV420P10,
+                                         AV_PIX_FMT_YUV420P12,
+                                         AV_PIX_FMT_YUV410P,
+                                         AV_PIX_FMT_YUVA444P,
+                                         AV_PIX_FMT_YUVA422P,
+                                         AV_PIX_FMT_YUVA420P,
+                                         AV_PIX_FMT_UYVY422,
+                                         // bwdif needs planar rgb
+                                         AV_PIX_FMT_GBRP,
+                                         AV_PIX_FMT_GBRP10,
+                                         AV_PIX_FMT_GBRP12,
+                                         AV_PIX_FMT_GBRP16,
+                                         AV_PIX_FMT_GBRAP,
+                                         AV_PIX_FMT_GBRAP16,
+                                     });
         } else if (media_type == AVMEDIA_TYPE_AUDIO) {
-            sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out"));
-
-            const AVSampleFormat sample_fmts[]  = {AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_NONE};
-            const int            sample_rates[] = {format_desc.audio_sample_rate, -1};
-
-            FF(av_opt_set_int(sink, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN));
-
-#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
-            FF(av_opt_set_array(sink,
-                                "sample_formats",
-                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                                0,
-                                FF_ARRAY_ELEMS(sample_fmts) - 1,
-                                AV_OPT_TYPE_SAMPLE_FMT,
-                                sample_fmts));
-            FF(av_opt_set_array(sink,
-                                "samplerates",
-                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                                0,
-                                FF_ARRAY_ELEMS(sample_rates) - 1,
-                                AV_OPT_TYPE_INT,
-                                sample_rates));
-#else
-            FF(av_opt_set_int_list(sink, "sample_fmts", sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
-            FF(av_opt_set_int_list(sink, "sample_rates", sample_rates, -1, AV_OPT_SEARCH_CHILDREN));
-#endif
+            sink = create_abuffersink(
+                graph.get(), "out", std::array{AV_SAMPLE_FMT_S32}, std::array{format_desc.audio_sample_rate});
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
         }
-
-        FF(avfilter_init_str(sink, nullptr));
 
         // output
         {

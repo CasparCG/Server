@@ -25,6 +25,7 @@
 
 #include "../util/util.h"
 
+#include <array>
 #include <common/diagnostics/graph.h>
 #include <common/except.h>
 #include <common/executor.h>
@@ -213,62 +214,24 @@ struct Filter
         }
 
         if (type == AVMEDIA_TYPE_VIDEO) {
-            sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("buffersink"), "out"));
-
-            AVPixelFormat pix_fmts[] = {pix_fmt, AV_PIX_FMT_NONE};
-#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
-            FF(av_opt_set_array(sink,
-                                "pixel_formats",
-                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                                0,
-                                FF_ARRAY_ELEMS(pix_fmts) - 1,
-                                AV_OPT_TYPE_PIXEL_FMT,
-                                pix_fmts));
-#else
-            FF(av_opt_set_int_list(sink, "pix_fmts", pix_fmts, -1, AV_OPT_SEARCH_CHILDREN));
-#endif
+            sink = create_buffersink(graph.get(), "out", std::array{pix_fmt});
         } else if (type == AVMEDIA_TYPE_AUDIO) {
-            sink = FFMEM(avfilter_graph_alloc_filter(graph.get(), avfilter_get_by_name("abuffersink"), "out"));
-
-            AVSampleFormat sample_fmts[]  = {AV_SAMPLE_FMT_S32, AV_SAMPLE_FMT_NONE};
-            int            sample_rates[] = {format_desc.audio_sample_rate, 0};
-#if LIBAVUTIL_VERSION_MAJOR >= 60 // FFmpeg 8
-            FF(av_opt_set_array(sink,
-                                "sample_formats",
-                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                                0,
-                                FF_ARRAY_ELEMS(sample_fmts) - 1,
-                                AV_OPT_TYPE_SAMPLE_FMT,
-                                sample_fmts));
-            FF(av_opt_set_array(sink,
-                                "samplerates",
-                                AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
-                                0,
-                                FF_ARRAY_ELEMS(sample_rates) - 1,
-                                AV_OPT_TYPE_INT,
-                                sample_rates));
-#else
-            FF(av_opt_set_int_list(sink, "sample_fmts", sample_fmts, -1, AV_OPT_SEARCH_CHILDREN));
-            FF(av_opt_set_int_list(sink, "sample_rates", sample_rates, 0, AV_OPT_SEARCH_CHILDREN));
-#endif
-
+            std::span<const AVChannelLayout> channel_layouts;
             // TODO - we might want to force the filter to produce 16 channels
             // But this segfaults (changing the property name causes it to fail with an error)
             // As 16 channel packets are fed into the filter, with the filter set to the same, that is what we get out
-            /*
-            AVChannelLayout channel_layout = AV_CHANNEL_LAYOUT_STEREO;
-            av_channel_layout_default(&channel_layout, format_desc.audio_channels);
-
-            FF(av_opt_set_chlayout(sink, "ch_layouts", &channel_layout, AV_OPT_SEARCH_CHILDREN));
-            av_channel_layout_uninit(&channel_layout);
-             */
-
+            //
+            // std::span<const AVChannelLayout> channel_layouts =
+            //     std::array{get_channel_layout_default(format_desc.audio_channels)};
+            sink = create_abuffersink(graph.get(),
+                                      "out",
+                                      std::array{AV_SAMPLE_FMT_S32},
+                                      std::array{format_desc.audio_sample_rate},
+                                      channel_layouts);
         } else {
             CASPAR_THROW_EXCEPTION(ffmpeg_error_t()
                                    << boost::errinfo_errno(EINVAL) << msg_info_t("invalid output media type"));
         }
-
-        FF(avfilter_init_str(sink, nullptr));
 
         {
             const auto cur = outputs;

@@ -2,6 +2,10 @@
 #include "av_assert.h"
 
 #include <common/bit_depth.h>
+#include <cstdint>
+#include <cstring>
+#include <span>
+#include <vector>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -9,10 +13,10 @@ extern "C" {
 #include <libavutil/channel_layout.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 }
 
-#include <array>
 #include <tbb/parallel_for.h>
 #include <tbb/parallel_invoke.h>
 
@@ -414,4 +418,234 @@ uint64_t get_channel_layout_mask_for_channels(int channel_count)
     return channel_layout;
 }
 
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+namespace {
+template <typename T>
+std::span<const T> span_terminated(const T* data, T terminator)
+{
+    if (!data) {
+        return {};
+    }
+    std::size_t size = 0;
+    while (data[size] != terminator)
+        size++;
+    return std::span(data, size);
+}
+
+template <typename T, typename F>
+std::span<const T> span_terminated_with(const T* data, F&& is_terminator)
+{
+    if (!data) {
+        return {};
+    }
+    std::size_t size = 0;
+    while (!is_terminator(data[size]))
+        size++;
+    return std::span(data, size);
+}
+} // namespace
+#endif
+
+std::span<const AVPixelFormat> get_supported_pixel_formats(const AVCodecContext* avctx, const AVCodec* codec)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    if (!codec)
+        codec = avctx->codec;
+    if (codec->type != AVMEDIA_TYPE_VIDEO)
+        FF_RET(AVERROR(EINVAL), "get_supported_pixel_formats");
+    return span_terminated(codec->pix_fmts, AV_PIX_FMT_NONE);
+#else
+    const AVPixelFormat* data = nullptr;
+    int                  size = 0;
+    FF(avcodec_get_supported_config(
+        avctx, codec, AV_CODEC_CONFIG_PIX_FORMAT, 0, reinterpret_cast<const void**>(&data), &size));
+    return std::span(data, size);
+#endif
+}
+
+void set_pixel_formats(AVFilterContext* target, std::span<const AVPixelFormat> array_ref)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    std::size_t size = array_ref.size_bytes();
+    if (size > static_cast<std::size_t>(INT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_pixel_formats"));
+    FF(av_opt_set_bin(target,
+                      "pix_fmts",
+                      reinterpret_cast<const uint8_t*>(array_ref.data()),
+                      static_cast<int>(size),
+                      AV_OPT_SEARCH_CHILDREN));
+#else
+    if (array_ref.size() > static_cast<std::size_t>(UINT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_pixel_formats"));
+    FF(av_opt_set_array(target,
+                        "pixel_formats",
+                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                        0,
+                        static_cast<unsigned>(array_ref.size()),
+                        AV_OPT_TYPE_PIXEL_FMT,
+                        array_ref.data()));
+#endif
+}
+
+std::span<const AVSampleFormat> get_supported_sample_formats(const AVCodecContext* avctx, const AVCodec* codec)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    if (!codec)
+        codec = avctx->codec;
+    if (codec->type != AVMEDIA_TYPE_AUDIO)
+        FF_RET(AVERROR(EINVAL), "get_supported_sample_formats");
+    return span_terminated(codec->sample_fmts, AV_SAMPLE_FMT_NONE);
+#else
+    const AVSampleFormat* data = nullptr;
+    int                   size = 0;
+    FF(avcodec_get_supported_config(
+        avctx, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0, reinterpret_cast<const void**>(&data), &size));
+    return std::span<const AVSampleFormat>(data, size);
+#endif
+}
+
+void set_sample_formats(AVFilterContext* target, std::span<const AVSampleFormat> array_ref)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    std::size_t size = array_ref.size_bytes();
+    if (size > static_cast<std::size_t>(INT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_sample_formats"));
+    FF(av_opt_set_bin(target,
+                      "sample_fmts",
+                      reinterpret_cast<const uint8_t*>(array_ref.data()),
+                      static_cast<int>(size),
+                      AV_OPT_SEARCH_CHILDREN));
+#else
+    if (array_ref.size() > static_cast<std::size_t>(UINT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_sample_formats"));
+    FF(av_opt_set_array(target,
+                        "sample_formats",
+                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                        0,
+                        static_cast<unsigned>(array_ref.size()),
+                        AV_OPT_TYPE_SAMPLE_FMT,
+                        array_ref.data()));
+#endif
+}
+
+std::span<const int> get_supported_sample_rates(const AVCodecContext* avctx, const AVCodec* codec)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    if (!codec)
+        codec = avctx->codec;
+    if (codec->type != AVMEDIA_TYPE_AUDIO)
+        FF_RET(AVERROR(EINVAL), "get_supported_sample_rates");
+    return span_terminated(codec->supported_samplerates, 0);
+#else
+    const int* data = nullptr;
+    int        size = 0;
+    FF(avcodec_get_supported_config(
+        avctx, codec, AV_CODEC_CONFIG_SAMPLE_RATE, 0, reinterpret_cast<const void**>(&data), &size));
+    return std::span<const int>(data, size);
+#endif
+}
+
+void set_sample_rates(AVFilterContext* target, std::span<const int> array_ref)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    std::size_t size = array_ref.size_bytes();
+    if (size > static_cast<std::size_t>(INT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_sample_rates"));
+    FF(av_opt_set_bin(target,
+                      "sample_rates",
+                      reinterpret_cast<const uint8_t*>(array_ref.data()),
+                      static_cast<int>(size),
+                      AV_OPT_SEARCH_CHILDREN));
+#else
+    if (array_ref.size() > static_cast<std::size_t>(UINT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_sample_rates"));
+    FF(av_opt_set_array(target,
+                        "samplerates",
+                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                        0,
+                        static_cast<unsigned>(array_ref.size()),
+                        AV_OPT_TYPE_INT,
+                        array_ref.data()));
+#endif
+}
+
+std::span<const AVChannelLayout> get_supported_channel_layouts(const AVCodecContext* avctx, const AVCodec* codec)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    if (!codec)
+        codec = avctx->codec;
+    if (codec->type != AVMEDIA_TYPE_AUDIO)
+        FF_RET(AVERROR(EINVAL), "get_supported_channel_layouts");
+    static constexpr AVChannelLayout terminator = {};
+    return span_terminated_with(codec->ch_layouts, [](const AVChannelLayout& v) {
+        return 0 == std::memcmp(&v, &terminator, sizeof(terminator));
+    });
+#else
+    const AVChannelLayout* data = nullptr;
+    int                    size = 0;
+    FF(avcodec_get_supported_config(
+        avctx, codec, AV_CODEC_CONFIG_CHANNEL_LAYOUT, 0, reinterpret_cast<const void**>(&data), &size));
+    return std::span<const AVChannelLayout>(data, size);
+#endif
+}
+
+void set_channel_layouts(AVFilterContext* target, std::span<const AVChannelLayout> array_ref)
+{
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    // TODO: need to translate into something that can be passed via av_opt_set_*
+    // FF(av_opt_set_chlayout(sink, "ch_layouts", ch_layouts, AV_OPT_SEARCH_CHILDREN));
+#else
+    if (array_ref.size() > static_cast<std::size_t>(UINT_MAX))
+        CASPAR_THROW_EXCEPTION(caspar::bad_alloc() << boost::errinfo_api_function("set_channel_layouts"));
+    FF(av_opt_set_array(target,
+                        "channel_layouts",
+                        AV_OPT_SEARCH_CHILDREN | AV_OPT_ARRAY_REPLACE,
+                        0,
+                        static_cast<unsigned>(array_ref.size()),
+                        AV_OPT_TYPE_CHLAYOUT,
+                        array_ref.data()));
+#endif
+}
+
+AVChannelLayout get_channel_layout_default(int nb_channels)
+{
+    AVChannelLayout retval{};
+    av_channel_layout_default(&retval, nb_channels);
+    return retval;
+}
+
+AVFilterContext* create_buffersink(AVFilterGraph* graph, const char* name, std::span<const AVPixelFormat> pixel_formats)
+{
+    AVFilterContext* retval = FFMEM(avfilter_graph_alloc_filter(graph, avfilter_get_by_name("buffersink"), name));
+    if (!pixel_formats.empty()) {
+        set_pixel_formats(retval, pixel_formats);
+    }
+    FF(avfilter_init_str(retval, nullptr));
+    return retval;
+}
+
+AVFilterContext* create_abuffersink(AVFilterGraph*                   graph,
+                                    const char*                      name,
+                                    std::span<const AVSampleFormat>  sample_formats,
+                                    std::span<const int>             sample_rates,
+                                    std::span<const AVChannelLayout> channel_layouts)
+{
+    AVFilterContext* retval = FFMEM(avfilter_graph_alloc_filter(graph, avfilter_get_by_name("abuffersink"), name));
+    if (!sample_formats.empty()) {
+        set_sample_formats(retval, sample_formats);
+    }
+    if (!sample_rates.empty()) {
+        set_sample_rates(retval, sample_rates);
+    }
+    if (!channel_layouts.empty()) {
+        set_channel_layouts(retval, channel_layouts);
+    }
+#if LIBAVFILTER_VERSION_INT < AV_VERSION_INT(10, 6, 0)
+    else {
+        FF(av_opt_set_int(retval, "all_channel_counts", 1, AV_OPT_SEARCH_CHILDREN));
+    }
+#endif
+    FF(avfilter_init_str(retval, nullptr));
+    return retval;
+}
 }} // namespace caspar::ffmpeg
