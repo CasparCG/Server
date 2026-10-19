@@ -1,0 +1,46 @@
+#!/bin/bash
+
+# Source shared distro settings: normalized ID, diagnostic font path and CEF policy.
+source /etc/os-release
+system_cef=AUTO
+
+# Resolve derivatives through ID_LIKE without replacing explicitly supported distro IDs.
+case "$ID" in
+  ubuntu|arch|fedora|debian|opensuse-leap|opensuse-tumbleweed|rocky) ;;
+  *)
+    for like in ${ID_LIKE:-}; do
+      case "$like" in
+        ubuntu|debian|arch|fedora)
+          ID="$like"
+          break
+          ;;
+      esac
+    done
+    ;;
+esac
+
+case "$ID" in
+  ubuntu)
+    font_path=/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf
+    ;;
+  arch)
+    font_path=/usr/share/fonts/liberation/LiberationMono-Regular.ttf
+    ;;
+  fedora)
+    font_path=/usr/share/fonts/liberation-mono-fonts/LiberationMono-Regular.ttf
+    ;;
+  debian)
+    font_path=/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf
+    ;;
+  opensuse-leap|opensuse-tumbleweed)
+    font_path=/usr/share/fonts/truetype/LiberationMono-Regular.ttf
+    ;;
+  rocky)
+    echo "Rocky Linux builds are deferred until the SFML dependency is removed." >&2
+    exit 1
+    ;;
+  *)
+    echo "Unsupported distribution: $ID. See BUILDING.md for supported platforms." >&2
+    exit 1
+    ;;
+esac

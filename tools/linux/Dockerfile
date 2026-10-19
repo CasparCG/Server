@@ -1,7 +1,16 @@
+# Build CasparCG and bundle its shared libraries into a separate runtime image.
 FROM docker.io/buildpack-deps:noble AS build-casparcg
 	ADD tools/linux/install-dependencies /
+	ADD tools/linux/platform-config /
+	ADD tools/linux/check-compiler /
+	ADD tools/linux/install-cef /
 
-	RUN apt-get update && /install-dependencies
+	ARG CC
+	ARG CXX
+	ARG GIT_HASH
+
+	# Download CEF during the build so its runtime can be bundled in the final image.
+	RUN /install-dependencies --download-cef
 
 	RUN mkdir /source && mkdir /build && mkdir /install
 
@@ -15,17 +24,13 @@ FROM docker.io/buildpack-deps:noble AS build-casparcg
 
 	COPY ./src /source
 
-	ARG CC
-	ARG CXX
-	ARG GIT_HASH
-
 	RUN cmake -GNinja /source -DUSE_STATIC_BOOST=ON -DUSE_SYSTEM_CEF=OFF -DENABLE_VULKAN=ON
 
 	RUN cmake --build .
 
 	RUN cmake --install . --prefix staging
 
-	# Find a better way to copy deps
+	# Collect linked libraries alongside the staged server for the runtime image.
 	RUN ln -s /build/staging /staging && \
 		/source/shell/copy_deps.sh /build/shell/casparcg /staging/lib
 

@@ -1,16 +1,62 @@
 #!/bin/bash
 
+# Install native build tools, libraries and CEF support as root on supported Linux distros.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/platform-config"
+source "$script_dir/check-compiler"
+source "$script_dir/install-cef"
+
+for argument in "$@"; do
+  case "$argument" in
+    --download-cef)
+      # Skip packaged CEF installation; the build must also select USE_SYSTEM_CEF=OFF.
+      system_cef=OFF
+      ;;
+    *)
+      echo "Usage: $0 [--download-cef]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$ID" in
+  arch)
+    # Keep Arch's package set coherent rather than performing a partial upgrade.
+    pacman -Syu --noconfirm
+    pacman -S --noconfirm --needed \
+      cmake ninja make binutils pkgconf curl git ca-certificates \
+      boost boost-libs ffmpeg glew libglvnd \
+      onetbb openal sfml libxrandr simde ttf-liberation \
+      gtk3 nss alsa-lib libcups libxcomposite libxdamage
+    # Probe only after the build tools and development libraries are available.
+    ensure_build_compiler
+    install_cef
+    exit 0
+    ;;
+  fedora|rocky|opensuse-leap|opensuse-tumbleweed)
+    exec env system_cef="$system_cef" platform_id="$ID" bash "$script_dir/install-dependencies-rpm"
+    ;;
+  ubuntu|debian)
+    apt-get update
+    ;;
+  *)
+    echo "Unsupported distribution: $ID. See BUILDING.md for supported platforms." >&2
+    exit 1
+    ;;
+esac
+
 apt-get install -yq --no-install-recommends \
   autoconf \
   automake \
   cmake \
   ninja-build \
   curl \
+  ca-certificates \
   bzip2 \
-  clang \
-  g++ \
-  gcc \
   git \
+  fonts-liberation \
   gperf \
   libtool \
   make \
@@ -29,12 +75,18 @@ apt-get install -yq --no-install-recommends \
   libxinerama-dev \
   libxi-dev \
   libsfml-dev \
+  libjpeg-dev \
   libxrandr-dev \
+  libx11-dev \
   libudev-dev \
   libglu1-mesa-dev \
   libgl1-mesa-dev \
   libegl1-mesa-dev \
   libboost-all-dev \
+  libasound2-dev \
+  libdrm-dev \
+  libgbm-dev \
+  libgtk-3-dev \
   libnss3-dev \
   libcups2-dev \
   libxdamage-dev \
@@ -50,3 +102,6 @@ apt-get install -yq --no-install-recommends \
   libswscale-dev \
   libswresample-dev \
   libsimde-dev
+
+ensure_build_compiler
+install_cef

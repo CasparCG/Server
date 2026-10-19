@@ -1,0 +1,60 @@
+#!/bin/bash
+
+# Configure and stage a native Linux build, or run only the dependency compile/link probe.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/platform-config"
+
+source_root="$(cd "$script_dir/../.." && pwd)"
+build_dir="$source_root/build"
+check_dependencies=OFF
+cmake_arguments=()
+# Consume helper options and forward remaining arguments as CMake overrides.
+while (( $# )); do
+  case "$1" in
+    --check-dependencies)
+      check_dependencies=ON
+      shift
+      ;;
+    -B)
+      if (( $# < 2 )); then
+        echo "-B requires a build directory" >&2
+        exit 1
+      fi
+      build_dir="$2"
+      shift 2
+      ;;
+    -B?*)
+      build_dir="${1#-B}"
+      shift
+      ;;
+    *)
+      cmake_arguments+=("$1")
+      shift
+      ;;
+  esac
+done
+if [[ "$check_dependencies" == ON ]]; then
+  # Keep probe targets and cache separate from the normal server build.
+  build_dir="$build_dir/dependency-check"
+fi
+mkdir -p "$build_dir"
+build_dir="$(cd "$build_dir" && pwd)"
+
+cmake -B "$build_dir" -S "$source_root/src" \
+  -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DENABLE_HTML=ON \
+  -DUSE_SYSTEM_CEF="$system_cef" \
+  -DCASPARCG_CHECK_DEPENDENCIES_ONLY="$check_dependencies" \
+  -DDIAG_FONT_PATH="$font_path" \
+  "${cmake_arguments[@]}"
+
+if [[ "$check_dependencies" == ON ]]; then
+  cmake --build "$build_dir" --target casparcg_dependency_check --parallel
+  exit 0
+fi
+
+cmake --build "$build_dir" --parallel
+cmake --install "$build_dir" --prefix "$build_dir/staging"

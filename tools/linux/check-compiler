@@ -1,0 +1,88 @@
+#!/bin/bash
+
+# Source this helper to retain a usable compiler or install the distro GCC fallback.
+# The caller supplies the normalized distro ID and runs with package-install privileges.
+ensure_build_compiler() (
+  set -euo pipefail
+
+  probe_dir="$(mktemp -d)"
+  trap 'rm -rf -- "$probe_dir"' EXIT
+
+  # Test both languages and C++20 library linking without building CasparCG.
+  cat > "$probe_dir/CMakeLists.txt" <<'EOF'
+cmake_minimum_required(VERSION 3.16)
+project(CasparCGCompilerCheck LANGUAGES C CXX)
+add_executable(c_check check.c)
+add_executable(cxx_check check.cpp)
+set_target_properties(cxx_check PROPERTIES
+    CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON CXX_EXTENSIONS OFF)
+EOF
+  cat > "$probe_dir/check.c" <<'EOF'
+int main(void) { return 0; }
+EOF
+  cat > "$probe_dir/check.cpp" <<'EOF'
+#include <filesystem>
+#include <span>
+#include <thread>
+
+int main()
+{
+    int values[] = {1, 2};
+    std::jthread worker([] {});
+    return std::filesystem::path(".").empty() || std::span(values).size() != 2;
+}
+EOF
+
+  probe_compiler() {
+    cmake -S "$probe_dir" -B "$probe_dir/build" -G Ninja \
+      > "$probe_dir/configure.log" 2>&1 &&
+      cmake --build "$probe_dir/build" > "$probe_dir/build.log" 2>&1
+  }
+
+  if probe_compiler; then
+    echo "Existing C/C++ compiler passes the C++20 compile/link check; keeping it."
+    return
+  fi
+
+  cat "$probe_dir/configure.log"
+  if [[ -f "$probe_dir/build.log" ]]; then
+    cat "$probe_dir/build.log"
+  fi
+  if [[ -n "${CC:-}" || -n "${CXX:-}" ]]; then
+    # An explicit selection must be repaired by the user, never silently replaced.
+    echo "The compiler selected by CC/CXX failed the compile/link check. Fix that selection and rerun the installer; it has not been overridden." >&2
+    return 1
+  fi
+
+  echo "No usable default C/C++ toolchain found; installing the distribution's GCC toolchain."
+  case "$ID" in
+    ubuntu|debian)
+      apt-get install -yq --no-install-recommends gcc g++
+      ;;
+    arch)
+      pacman -S --noconfirm --needed gcc
+      ;;
+    fedora)
+      dnf -y --setopt=install_weak_deps=False install gcc gcc-c++
+      ;;
+    opensuse-leap|opensuse-tumbleweed)
+      zypper --non-interactive install --no-recommends gcc gcc-c++
+      ;;
+    *)
+      echo "Unsupported distribution for compiler installation: $ID" >&2
+      return 1
+      ;;
+  esac
+
+  # Do not reuse CMake's cached compiler selection after installing a toolchain.
+  rm -rf -- "$probe_dir/build"
+  if ! probe_compiler; then
+    cat "$probe_dir/configure.log"
+    if [[ -f "$probe_dir/build.log" ]]; then
+      cat "$probe_dir/build.log"
+    fi
+    echo "The default compiler still fails the compile/link check. Select a usable compiler with CC/CXX and rerun the installer." >&2
+    return 1
+  fi
+  echo "Installed C/C++ compiler passes the C++20 compile/link check."
+)

@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# Emit unique source include targets, or ordered per-file directives with --preprocessor.
+set -euo pipefail
+export LC_ALL=C
+
+# This is not a full C++ lexer/preprocessor: unchanged includes/directives cannot
+# reveal newer API usage or runtime incompatibilities; full builds/testing remain necessary.
+mode=includes
+if [[ "${1:-}" == --preprocessor ]]; then
+  mode=preprocessor
+  shift
+fi
+
+# Include internal and Windows headers rather than guessing external-library ownership.
+find "${1:-src}" -type f \( \
+  -iname '*.c' -o -iname '*.cc' -o -iname '*.cpp' -o -iname '*.cxx' -o \
+  -iname '*.h' -o -iname '*.hh' -o -iname '*.hpp' -o -iname '*.hxx' -o \
+  -iname '*.inl' -o -iname '*.inc' -o -iname '*.ipp' -o -iname '*.tpp' \
+  \) -print0 |
+  xargs -0 -r awk -v mode="$mode" '
+    FNR == 1 { block_comment = 0; pending = ""; directive = 0 }
+    {
+      line = pending $0
+      sub(/\r$/, "", line)
+      # Join continued directives before stripping comments.
+      if (sub(/\\$/, "", line)) {
+        pending = line
+        next
+      }
+      pending = ""
+      clean = ""
+      quote = ""
+      # Preserve quoted comment markers while removing actual C/C++ comments.
+      for (i = 1; i <= length(line); i++) {
+        ch = substr(line, i, 1)
+        pair = substr(line, i, 2)
+        if (block_comment) {
+          if (pair == "*/") { block_comment = 0; i++ }
+        } else if (quote != "") {
+          clean = clean ch
+          if (ch == "\\") {
+            clean = clean substr(line, ++i, 1)
+          } else if (ch == quote) {
+            quote = ""
+          }
+        } else if (pair == "//") {
+          break
+        } else if (pair == "/*") {
+          block_comment = 1
+          clean = clean " "
+          i++
+        } else {
+          clean = clean ch
+          if (ch == "\"" || ch == sprintf("%c", 39)) quote = ch
+        }
+      }
+      if (mode == "preprocessor") {
+        # Preserve version guards, macros and branch order, not source line numbers.
+        # Unrelated directive changes deliberately also invalidate the CI baseline.
+        if (clean ~ /^[[:space:]]*#/ &&
+            clean !~ /^[[:space:]]*#[[:space:]]*include[[:space:]<"]/) {
+          sub(/^[[:space:]]*#[[:space:]]*/, "", clean)
+          sub(/[[:space:]]+$/, "", clean)
+          printf "%s:%08d:%s\n", FILENAME, ++directive, clean
+        }
+      } else if (clean ~ /^[[:space:]]*#[[:space:]]*include[[:space:]<"]/) {
+        sub(/^[[:space:]]*#[[:space:]]*include[[:space:]]*/, "", clean)
+        sub(/[[:space:]]+$/, "", clean)
+        if (clean ~ /^</) {
+          sub(/>.*/, ">", clean)
+        } else if (clean ~ /^"/) {
+          clean = substr(clean, 1, index(substr(clean, 2), "\"") + 1)
+        } else {
+          gsub(/[[:space:]]+/, " ", clean)
+        }
+        # Global deduplication lets other files reuse an existing include without invalidation.
+        print clean
+      }
+    }
+  ' | sort -u

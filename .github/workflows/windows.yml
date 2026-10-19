@@ -6,9 +6,21 @@ on:
     pull_request:
         branches: ["master"]
 
+concurrency:
+    # Release refs (master, v*.x and v*.x-lts branches such as v2.5.x and v2.3.x-lts, tags) get a group unique per ref+commit, so a later push
+    # to one of them can never replace another release push's still-pending run in the same
+    # group - GitHub's default "queue: single" behavior cancels a pending run whenever a new one
+    # is queued into the same group, independent of cancel-in-progress (which only governs the
+    # already-running run). Including the ref alongside the commit sha keeps two tags that point
+    # at the same commit from colliding into one group. Everything else keeps sharing one group
+    # per PR/branch as before.
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || ((github.ref == 'refs/heads/master' || (startsWith(github.ref, 'refs/heads/v') && (endsWith(github.ref, '.x') || endsWith(github.ref, '.x-lts'))) || startsWith(github.ref, 'refs/tags/')) && format('{0}-{1}', github.ref, github.sha)) || github.ref }}
+    cancel-in-progress: ${{ !(github.ref == 'refs/heads/master' || (startsWith(github.ref, 'refs/heads/v') && (endsWith(github.ref, '.x') || endsWith(github.ref, '.x-lts'))) || startsWith(github.ref, 'refs/tags/')) }}
+
 jobs:
     build:
         runs-on: windows-2022
+        timeout-minutes: 120
 
         steps:
             - uses: actions/checkout@v7

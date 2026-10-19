@@ -1,0 +1,49 @@
+#!/bin/bash
+
+# Emit the CI baseline hash for installed dependencies and repository build requirements.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$script_dir/../.."
+source /etc/os-release
+
+package_inventory() {
+  # Include all packages so indirect dependencies and base-image updates invalidate CI baselines.
+  case "$ID" in
+    ubuntu|debian)
+      dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n'
+      ;;
+    arch)
+      pacman -Q
+      ;;
+    fedora|opensuse-leap|opensuse-tumbleweed)
+      rpm -qa --qf '%{NAME}\t%{EPOCHNUM}:%{VERSION}-%{RELEASE}\t%{ARCH}\n'
+      ;;
+    *)
+      echo "Unsupported distribution for dependency fingerprint: $ID" >&2
+      return 1
+      ;;
+  esac
+}
+
+export LC_ALL=C
+# Hash the environment, source dependency signals, build definitions and dependency pins.
+{
+  cat /etc/os-release
+  package_inventory | sort
+  cmake --version
+  c++ --version
+  ld --version
+  bash "$script_dir/source-includes"
+  bash "$script_dir/source-includes" --preprocessor
+  {
+    find src -type f -name CMakeLists.txt -print0
+    # CI generates a timestamped packaging changelog on every run.
+    find src/CMakeModules tools/linux -type f ! -path 'tools/linux/deb/*/debian/changelog' -print0
+    printf '%s\0' .github/workflows/linux-system.yml
+  } |
+    sort -z |
+    while IFS= read -r -d '' file; do
+      sha256sum "$file"
+    done
+} | sha256sum | cut -d ' ' -f 1

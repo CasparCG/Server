@@ -1,9 +1,15 @@
 #!/usr/bin/make -f
+# Drive Debian builds through debhelper with native CMake dependency discovery.
+.PHONY: build
+
+build:
+	dh $@ --sourcedirectory=src --buildsystem=cmake
+
 %:
 	dh $@ --sourcedirectory=src --buildsystem=cmake
 
 override_dh_auto_configure:
-	dh_auto_configure -- -DDIAG_FONT_PATH=/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf -DCASPARCG_BINARY_NAME=casparcg-server-beta -DUSE_SYSTEM_CEF=OFF
+	dh_auto_configure -- -DDIAG_FONT_PATH=/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf -DCASPARCG_BINARY_NAME=casparcg-server-beta $(if $(CASPARCG_DOWNLOAD_CACHE),-DCASPARCG_DOWNLOAD_CACHE="$(CASPARCG_DOWNLOAD_CACHE)")
 
 # The prebuilt CEF binaries carry DWARF 5 debug sections (.debug_addr) that dwz cannot
 # read yet (https://bugs.debian.org/1016936). dh_strip still runs normally afterwards.

@@ -1,0 +1,76 @@
+#!/bin/bash
+
+# Source this helper to install compatible packaged CEF before CMake's download fallback.
+# The caller supplies the distro ID, optional system_cef policy and install privileges.
+install_cef() {
+  if [[ "${system_cef:-AUTO}" == OFF ]]; then
+    echo "CEF will be downloaded and its wrapper built by CMake."
+    return
+  fi
+
+  local package version metadata
+  local -x LC_ALL=C
+  case "$ID" in
+    ubuntu|debian)
+      if [[ "$ID" == ubuntu ]]; then
+        apt-get install -yq --no-install-recommends software-properties-common
+        add-apt-repository -y ppa:casparcg/ppa
+        apt-get update
+      fi
+      # Prefer the API-specific CasparCG package over a generic distro package.
+      for package in casparcg-cef-api15000-dev libcef-dev; do
+        metadata="$(apt-cache policy "$package")"
+        version="$(awk '/Candidate:/ {print $2}' <<< "$metadata")"
+        if [[ "$version" != "" && "$version" != '(none)' ]]; then
+          if [[ "$package" == casparcg-cef-api15000-dev ]] || cef_version_compatible "$version"; then
+            apt-get install -yq --no-install-recommends "$package"
+            return
+          fi
+        fi
+      done
+      ;;
+    arch)
+      if metadata="$(pacman -Si cef 2>&1)"; then
+        version="$(awk '/^Version[[:space:]]*:/ {print $3}' <<< "$metadata")"
+        if cef_version_compatible "$version"; then
+          pacman -S --noconfirm --needed cef
+          return
+        fi
+      else
+        printf '%s\n' "$metadata" >&2
+      fi
+      ;;
+    fedora)
+      if metadata="$(dnf -q list --showduplicates cef-devel 2>&1)"; then
+        while IFS= read -r version; do
+          if cef_version_compatible "$version"; then
+            dnf -y --setopt=install_weak_deps=False install cef-devel
+            return
+          fi
+        done <<< "$(awk '/^cef-devel[.]/ {print $2}' <<< "$metadata")"
+      else
+        printf '%s\n' "$metadata" >&2
+      fi
+      ;;
+    opensuse-leap|opensuse-tumbleweed)
+      for package in cef-devel libcef-devel; do
+        if metadata="$(zypper --non-interactive info "$package" 2>&1)"; then
+          version="$(awk '/^Version[[:space:]]*:/ {print $3; exit}' <<< "$metadata")"
+          if cef_version_compatible "$version"; then
+            zypper --non-interactive install --no-recommends "$package"
+            return
+          fi
+        else
+          printf '%s\n' "$metadata" >&2
+        fi
+      done
+      ;;
+  esac
+  echo "No compatible CEF package available; CMake will check installed packages, then download CEF and build its wrapper if needed."
+}
+
+cef_version_compatible() {
+  # Strip a package epoch before checking the minimum CEF major version.
+  local version="${1#*:}"
+  [[ "$version" =~ ^([0-9]+)[.] ]] && (( BASH_REMATCH[1] >= 150 ))
+}

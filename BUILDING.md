@@ -50,8 +50,8 @@ You can figure out which files you need by looking at each of the `ExternalProje
 
 We only officially support Ubuntu LTS releases, other distros may work but often run into build issues. We are happy to accept PRs to resolve these issues, but are unlikely to write fixes ourselves.
 
-We currently document two approaches to building CasparCG. The recommended way is to use the `deb` packaging we have in the repository, but we only provide that for Ubuntu LTS releases.
-Other deb based distros can work with some tweaks to one of those, other distros will need something else which is not documented here.
+We currently document two approaches to building CasparCG. The recommended way is to use the `deb` packaging we have in the repository for Ubuntu and Debian.
+For native builds on other distributions, follow the Development steps below.
 
 We also provide a script to produce a build in docker, but this is not recommended unless absolutely necessary. The resulting builds are often rather brittle depending on where they are used.
 
@@ -75,18 +75,64 @@ _Note: if you ran docker with sudo, CasparCG server will not be able to run with
 
 ## Development
 
-Before beginning, check the build options section below, to decide if you want to use any to simplify or customise your build.
+The build can start from a minimal supported Linux install with Git, a working
+package manager, and either `sudo` or a root shell. Clone the repository and
+install the native dependencies:
 
 1. `git clone --single-branch --branch master https://github.com/CasparCG/server casparcg-server-master`
 2. `cd casparcg-server-master`
-3. Install dependencies, this can be done with `sudo ./tools/linux/install-dependencies`
-4. If using system CEF (default & recommended), `sudo add-apt-repository ppa:casparcg/ppa` and `sudo apt-get install casparcg-cef-api15000-dev`
-5. `mkdir build && cd build`
-6. `cmake ../src` You can add any of the build options from below to this command
-7. `cmake --build . --parallel`
-8. `cmake --install . --prefix staging`
+3. Install dependencies with `sudo ./tools/linux/install-dependencies`.
+4. `mkdir build && cd build`
+5. `cmake ../src` You can add any of the build options below to this command.
+6. `cmake --build . --parallel`
+7. `cmake --install . --prefix staging`
 
-If all goes to plan, a folder called 'staging' has been created with everything you need to run CasparCG server.
+The staged build is in `build/staging`. As a shortcut, `./tools/linux/build-with-system-deps`
+from the repository root configures, builds, and installs in one command, selecting
+the diagnostic font path for the current distribution. CMake options can be
+passed after the script name.
+
+The dependency installer handles Ubuntu 24.04/26.04, Debian Trixie/Sid, Arch
+Linux, Fedora Rawhide, and openSUSE Leap 16.0/Tumbleweed, including CEF setup.
+It adds the CasparCG PPA on Ubuntu and performs a full system upgrade on Arch.
+After installing libraries and build tools, it checks the compiler selected by
+CMake with a C/C++20 compile-and-link probe. A working existing toolchain is kept;
+otherwise the distro's GCC toolchain is installed. Compiler alternatives are not
+changed. An explicit `CC`/`CXX` selection that fails the check reports an error
+instead of being overridden. Pass the same variables to installation and building,
+for example `sudo env CC=clang CXX=clang++ ./tools/linux/install-dependencies`
+and `CC=clang CXX=clang++ cmake ../src`.
+
+HTML/CEF is enabled by default on every supported distro. The installer and CMake
+prefer the CasparCG API 15000 package (from the PPA on Ubuntu), then a compatible
+distro CEF package (150 or newer). If neither is available, CMake downloads the
+pinned prebuilt CEF runtime and compiles only its wrapper, not Chromium. The
+downloaded runtime and its resources are included in the staged installation.
+The downloaded archive is x86-64 only; other architectures require a compatible
+packaged CEF. Explicitly disable HTML with `-DENABLE_HTML=OFF` only if desired.
+For a downloaded-CEF build, pass `--download-cef` to the dependency installer and
+`-DUSE_SYSTEM_CEF=OFF` to CMake or the build script.
+These builds require CMake 3.28 or newer and Boost 1.83 or newer. Non-Ubuntu targets are experimental.
+
+Fedora 44/45 currently package CEF 146, older than the required API 15000;
+Rawhide provides a compatible system CEF package.
+
+### Checking dependencies without building the server
+
+For a local dependency-only check, run
+`./tools/linux/build-with-system-deps --check-dependencies` after installing
+dependencies. It uses `build/dependency-check` and does not build or install the
+server. Additional CMake options and `-B <directory>` are accepted; the probe uses
+a `dependency-check` subdirectory of the selected build directory.
+
+This runs the normal Linux CMake dependency discovery and a small C++20
+compile/link probe against system libraries, including system CEF when enabled.
+It checks shared-library symbol resolution, but does not validate CasparCG source
+compatibility or the installed server. Downloaded CEF and its wrapper require a
+full build for validation.
+When a distro provides its CEF wrapper as source, the dependency probe links the
+installed CEF library without compiling that wrapper; full builds validate the
+wrapper.
 
 ## Build options
 
@@ -94,7 +140,9 @@ If all goes to plan, a folder called 'staging' has been created with everything 
 
 -DUSE_STATIC_BOOST=ON - (Linux only, default OFF) statically link against Boost.
 
--DUSE_SYSTEM_CEF=OFF - (Linux only, default ON) use the version of CEF from your OS. This expects to be using builds from https://launchpad.net/~casparcg/+archive/ubuntu/ppa
+-DUSE_SYSTEM_CEF=AUTO - (Linux only, default AUTO) prefer the CasparCG CEF package, then compatible distro CEF, then download the runtime and compile its wrapper. ON requires a compatible package; OFF always uses downloaded CEF.
+
+-DENABLE_VULKAN=ON - (Linux only, default OFF) enable Vulkan support; requires a compatible Vulkan SDK.
 
 -DENABLE_AVX2=ON (Linux only, default OFF) Enable the AVX and AVX2 instruction sets (requires a CPU that supports it)
 

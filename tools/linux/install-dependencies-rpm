@@ -1,0 +1,53 @@
+#!/bin/bash
+
+# Install RPM-family build dependencies as root on behalf of install-dependencies.
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$script_dir/check-compiler"
+source "$script_dir/install-cef"
+source /etc/os-release
+# Preserve the caller's normalized distro ID across exec (e.g. Nobara -> Fedora).
+ID="${platform_id:-$ID}"
+
+case "$ID" in
+  fedora)
+    dnf -y --setopt=install_weak_deps=False install \
+      cmake ninja-build git make pkgconf-pkg-config curl tar bzip2 ca-certificates \
+      liberation-mono-fonts cups-libs \
+      boost-devel SFML-devel glew-devel tbb-devel openal-soft-devel \
+      libglvnd-devel libX11-devel libXrandr-devel \
+      gtk3-devel nss-devel alsa-lib-devel mesa-libgbm-devel libdrm-devel libicu-devel \
+      ffmpeg-free-devel
+    ;;
+  rocky)
+    echo "Rocky Linux builds are deferred until the SFML dependency is removed." >&2
+    exit 1
+    ;;
+  opensuse-leap|opensuse-tumbleweed)
+    zypper --non-interactive refresh
+    zypper --non-interactive install --no-recommends \
+      cmake ninja git make pkg-config curl tar bzip2 ca-certificates \
+      liberation-fonts libcups2 \
+      boost-devel 'cmake(SFML)' \
+      libboost_thread-devel libboost_filesystem-devel libboost_log-devel \
+      libboost_locale-devel libboost_regex-devel libboost_date_time-devel \
+      libboost_coroutine-devel \
+      'pkgconfig(gtk+-3.0)' 'pkgconfig(nss)' 'pkgconfig(alsa)' \
+      'pkgconfig(gbm)' 'pkgconfig(libdrm)' 'pkgconfig(icu-uc)' \
+      'pkgconfig(glew)' 'pkgconfig(tbb)' 'pkgconfig(openal)' \
+      'pkgconfig(gl)' 'pkgconfig(glx)' 'pkgconfig(egl)' \
+      'pkgconfig(x11)' 'pkgconfig(xrandr)' \
+      'pkgconfig(libavcodec)' 'pkgconfig(libavformat)' \
+      'pkgconfig(libavdevice)' 'pkgconfig(libavutil)' \
+      'pkgconfig(libavfilter)' 'pkgconfig(libswscale)' \
+      'pkgconfig(libswresample)'
+    ;;
+  *)
+    echo "Unsupported RPM distribution: $ID" >&2
+    exit 1
+    ;;
+esac
+
+ensure_build_compiler
+install_cef

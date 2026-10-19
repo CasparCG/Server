@@ -5,12 +5,36 @@ on:
         # branches: [ "master" ]
     pull_request:
         branches: ["master"]
+    workflow_dispatch:
+        # Actions > Run workflow on the desired branch; enable this to rebuild
+        # every target regardless of its baseline. Otherwise normal selection applies.
+        # The Actions UI exposes dispatch once this workflow is on the default branch.
+        inputs:
+            force_full_build:
+                description: Rebuild alternate platforms even if dependencies are unchanged
+                type: boolean
+                default: false
+
+concurrency:
+    # Release refs (master, v*.x and v*.x-lts branches such as v2.5.x and v2.3.x-lts, tags) get a group unique per ref+commit, so a later push
+    # to one of them can never replace another release push's still-pending run in the same
+    # group - GitHub's default "queue: single" behavior cancels a pending run whenever a new one
+    # is queued into the same group, independent of cancel-in-progress (which only governs the
+    # already-running run). Including the ref alongside the commit sha keeps two tags that point
+    # at the same commit from colliding into one group. Everything else keeps sharing one group
+    # per PR/branch as before.
+    group: ${{ github.workflow }}-${{ github.event.pull_request.number || ((github.ref == 'refs/heads/master' || (startsWith(github.ref, 'refs/heads/v') && (endsWith(github.ref, '.x') || endsWith(github.ref, '.x-lts'))) || startsWith(github.ref, 'refs/tags/')) && format('{0}-{1}', github.ref, github.sha)) || github.ref }}
+    cancel-in-progress: ${{ !(github.ref == 'refs/heads/master' || (startsWith(github.ref, 'refs/heads/v') && (endsWith(github.ref, '.x') || endsWith(github.ref, '.x-lts'))) || startsWith(github.ref, 'refs/tags/')) }}
 
 jobs:
     build:
-        name: ${{ matrix.container || matrix.os }} ${{ matrix.arch }} (${{matrix.family}}:${{ matrix.distribution }})
+        name: ${{ matrix.family }}-${{ matrix.distribution }} ${{ matrix.arch }}
         strategy:
             fail-fast: false
+            # Ubuntu and Arch always compile; other targets always probe dependencies
+            # and compile when no matching successful full-build baseline exists,
+            # on release refs, or when manually forced. There is no scheduled rebuild.
+            # All targets report failures; CI coverage does not extend official support beyond Ubuntu.
             matrix:
                 include:
                     - os: ubuntu-24.04
@@ -20,6 +44,7 @@ jobs:
                       container: ""
                       apt_prefix: sudo
                       upload_artifacts: true
+                      full_build: true
                     - os: ubuntu-latest
                       family: ubuntu
                       distribution: resolute
@@ -27,6 +52,7 @@ jobs:
                       container: ubuntu:26.04
                       apt_prefix: ""
                       upload_artifacts: false
+                      full_build: true
                     - os: ubuntu-24.04-arm
                       family: ubuntu
                       distribution: resolute
@@ -34,33 +60,56 @@ jobs:
                       container: ubuntu:26.04
                       apt_prefix: ""
                       upload_artifacts: false
+                      full_build: true
                     - os: ubuntu-latest
                       family: debian
                       distribution: trixie
                       arch: amd64
                       container: debian:trixie # Debian 13
                       apt_prefix: ""
-                      upload_artifacts: false # Because of CEF, this is not built correctly
+                      upload_artifacts: false
                     - os: ubuntu-latest
                       family: debian
                       distribution: sid
                       arch: amd64
                       container: debian:sid # Debian Testing
                       apt_prefix: ""
-                      upload_artifacts: false # Because of CEF, this is not built correctly
-                      experimental: true
+                      upload_artifacts: false
                     - os: ubuntu-latest
                       family: archlinux
                       distribution: latest
                       arch: amd64
                       container: archlinux:latest
                       apt_prefix: ""
-                      upload_artifacts: false # Not supported
-                      experimental: true
+                      upload_artifacts: false # Not packaged, this just verifies the build + system CEF discovery
+                      full_build: true
+                    - os: ubuntu-latest
+                      family: fedora
+                      distribution: rawhide
+                      arch: amd64
+                      container: fedora:rawhide # Stable releases currently ship CEF older than API 15000
+                      apt_prefix: ""
+                      upload_artifacts: false
+                    - os: ubuntu-latest
+                      family: opensuse
+                      distribution: leap-16.0
+                      arch: amd64
+                      container: opensuse/leap:16.0
+                      apt_prefix: ""
+                      upload_artifacts: false
+                    - os: ubuntu-latest
+                      family: opensuse
+                      distribution: tumbleweed
+                      arch: amd64
+                      container: opensuse/tumbleweed:latest
+                      apt_prefix: ""
+                      upload_artifacts: false
 
         runs-on: ${{ matrix.os }}
+        timeout-minutes: 120
         container: ${{ matrix.container }}
-        continue-on-error: ${{ matrix.experimental || false }} # Stop failures of smoke tests being loud
+        env:
+            FULL_BUILD: ${{ matrix.full_build || false }}
         defaults:
             run:
                 shell: bash
@@ -69,6 +118,14 @@ jobs:
             - name: Install git (archlinux)
               if: ${{ matrix.family == 'archlinux' }}
               run: pacman -Sy --noconfirm git
+
+            - name: Install git (openSUSE)
+              if: ${{ matrix.family == 'opensuse' }}
+              run: zypper --non-interactive install --no-recommends git
+
+            - name: Install git (Fedora)
+              if: ${{ matrix.family == 'fedora' }}
+              run: dnf -y install git
 
             - uses: actions/checkout@v7
 
@@ -95,7 +152,7 @@ jobs:
 
                   # install some needed tooling
                   $APT_PREFIX apt-get update
-                  $APT_PREFIX apt-get -y install build-essential dpkg-dev debhelper devscripts
+                  $APT_PREFIX apt-get -y install build-essential dpkg-dev debhelper devscripts ninja-build
 
                   if [[ "${{ matrix.family }}" == "ubuntu" ]]; then
                     $APT_PREFIX apt-get -y install software-properties-common
@@ -121,17 +178,91 @@ jobs:
                   DEBIAN_FRONTEND: noninteractive
                   APT_PREFIX: ${{ matrix.apt_prefix }}
 
-            - name: Run build
-              if: ${{ matrix.family == 'ubuntu' || matrix.family == 'debian' }}
-              run: |
-                  # Perform build
-                  debuild -b -uc -us
+            - name: Install native dependencies
+              if: ${{ matrix.family == 'archlinux' || matrix.family == 'fedora' || matrix.family == 'opensuse' }}
+              run: ./tools/linux/install-dependencies
               env:
                   CI: 1
 
+            - name: Test Linux dependency helpers
+              run: |
+                  bash tools/linux/tests/check-compiler.sh
+                  bash tools/linux/tests/install-cef.sh
+                  bash tools/linux/tests/cef-selection.sh
+                  bash tools/linux/tests/source-includes.sh
+
+            - name: Cache dependency downloads
+              if: ${{ matrix.family == 'debian' || matrix.family == 'opensuse' }}
+              uses: actions/cache@v5
+              with:
+                  path: .cache/casparcg-downloads
+                  key: downloads-${{ matrix.family }}-${{ matrix.distribution }}-${{ matrix.arch }}-${{ hashFiles('src/CMakeModules/Bootstrap_Linux.cmake') }}
+
+            - name: Fingerprint alternate-platform dependencies
+              id: dependencies
+              if: ${{ !matrix.full_build }}
+              run: |
+                  fingerprint=$(./tools/linux/dependency-fingerprint)
+                  echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+                  echo "Dependency/build-definition fingerprint: $fingerprint"
+
+            # Cache misses (including eviction) require a full build. GitHub's
+            # branch/PR cache visibility may mean a new PR needs its own initial build.
+            - name: Look up last successful full build
+              id: previous-build
+              if: ${{ !matrix.full_build }}
+              uses: actions/cache/restore@v5
+              with:
+                  path: .cache/system-build-baseline
+                  key: system-build-${{ matrix.family }}-${{ matrix.distribution }}-${{ matrix.arch }}-${{ steps.dependencies.outputs.fingerprint }}
+                  lookup-only: true
+
+            - name: Select alternate-platform build
+              if: ${{ !matrix.full_build }}
+              run: |
+                  if [[ "$RELEASE_REF" == 'true' ]]; then
+                    echo "FULL_BUILD=true" >> "$GITHUB_ENV"
+                    echo "Full build required: release refs always build every target."
+                  elif [[ "$PREVIOUS_BUILD" != 'true' || "$FORCE_FULL_BUILD" == 'true' ]]; then
+                    echo "FULL_BUILD=true" >> "$GITHUB_ENV"
+                    echo "Full build required: dependencies/build definitions changed, no successful baseline exists, or a manual rebuild was requested."
+                  else
+                    echo "Dependencies/build definitions match a successful full build; running the dependency probe only."
+                  fi
+              env:
+                  PREVIOUS_BUILD: ${{ steps.previous-build.outputs.cache-hit }}
+                  FORCE_FULL_BUILD: ${{ inputs.force_full_build || false }}
+                  RELEASE_REF: ${{ github.event_name != 'pull_request' && (github.ref == 'refs/heads/master' || (startsWith(github.ref, 'refs/heads/v') && (endsWith(github.ref, '.x') || endsWith(github.ref, '.x-lts'))) || startsWith(github.ref, 'refs/tags/')) }}
+
+            # Probes check discovery and system-library linking, not server source
+            # compatibility or runtime behavior. Downloaded CEF/wrappers need full builds.
+            - name: Check dependency versions and linker
+              if: ${{ !matrix.full_build }}
+              run: ./tools/linux/build-with-system-deps --check-dependencies -DCASPARCG_DOWNLOAD_CACHE="$GITHUB_WORKSPACE/.cache/casparcg-downloads"
+              env:
+                  CI: 1
+
+            - name: Build Ubuntu packages
+              if: ${{ matrix.family == 'ubuntu' && env.FULL_BUILD == 'true' }}
+              run: |
+                  # Perform build
+                  debuild --preserve-envvar=CASPARCG_DOWNLOAD_CACHE -b -uc -us
+              env:
+                  CI: 1
+                  CASPARCG_DOWNLOAD_CACHE: ${{ github.workspace }}/.cache/casparcg-downloads
+
+            # Debian validates compilation, including the selected CEF wrapper, but
+            # does not stage/package bundled CEF or produce .deb artifacts here.
+            - name: Compile Debian targets without packaging
+              if: ${{ matrix.family == 'debian' && env.FULL_BUILD == 'true' }}
+              run: debian/rules build
+              env:
+                  CI: 1
+                  CASPARCG_DOWNLOAD_CACHE: ${{ github.workspace }}/.cache/casparcg-downloads
+
             - name: Collect artifacts
               id: artifacts
-              if: ${{ (matrix.family == 'ubuntu' || matrix.family == 'debian') && matrix.upload_artifacts }}
+              if: ${{ matrix.family == 'ubuntu' && matrix.upload_artifacts }}
               run: |
                   mkdir -p dist
                   mv ../*.deb dist/
@@ -160,32 +291,70 @@ jobs:
                   CI: 1
 
             - uses: actions/upload-artifact@v7
-              if: ${{ (matrix.family == 'ubuntu' || matrix.family == 'debian') && matrix.upload_artifacts }}
+              if: ${{ matrix.family == 'ubuntu' && matrix.upload_artifacts }}
               with:
                   name: ${{ steps.setup-env.outputs.BUILD_FILENAME }}
                   path: dist
 
-            - name: Setup environment (archlinux)
-              if: ${{ matrix.family == 'archlinux' }}
-              run: |
-                  pacman -Syu --noconfirm
-                  pacman -S --noconfirm --needed \
-                    base-devel cmake ninja pkg-config \
-                    boost boost-libs ffmpeg glew libglvnd \
-                    onetbb openal sfml \
-                    libxrandr simde
+            - name: Build and install native targets
+              if: ${{ env.FULL_BUILD == 'true' && (matrix.family == 'archlinux' || matrix.family == 'fedora' || matrix.family == 'opensuse') }}
+              run: ./tools/linux/build-with-system-deps -DCASPARCG_DOWNLOAD_CACHE="$GITHUB_WORKSPACE/.cache/casparcg-downloads"
               env:
                   CI: 1
+                  CMAKE_BUILD_PARALLEL_LEVEL: 2
 
-            - name: Run build (archlinux)
-              if: ${{ matrix.family == 'archlinux' }}
+            # Packaged CEF must resolve without an LD_LIBRARY_PATH override; Arch
+            # and Fedora also require RPATH/RUNPATH. Downloaded CEF uses staged libs.
+            # These linkage checks are not runtime playback/HTML tests.
+            - name: Verify installed CEF linkage
+              if: ${{ env.FULL_BUILD == 'true' && (matrix.family == 'archlinux' || matrix.family == 'fedora' || matrix.family == 'opensuse') }}
               run: |
-                  cmake -B build -S src \
-                    -DCMAKE_BUILD_TYPE=Release \
-                    -DDIAG_FONT_PATH="/usr/share/fonts/liberation/LiberationMono-Regular.ttf" \
-                    -DENABLE_HTML=OFF \
-                    -G Ninja
+                  binary="$PWD/build/staging/bin/casparcg"
+                  if [[ -f "$PWD/build/staging/lib/libcef.so" ]]; then
+                    export LD_LIBRARY_PATH="$PWD/build/staging/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+                  elif [[ "$CEF_FAMILY" == 'archlinux' || "$CEF_FAMILY" == 'fedora' ]]; then
+                    dynamic_section=$(readelf -d "$binary")
+                    printf '%s\n' "$dynamic_section"
+                    grep -qE '\((RPATH|RUNPATH)\)' <<< "$dynamic_section"
+                  fi
 
-                  cmake --build build
+                  libraries=$(ldd "$binary" 2>&1)
+                  printf '%s\n' "$libraries"
+                  if [[ "$libraries" == *'not found'* ]]; then
+                    echo "::error::Installed binary has unresolved shared libraries"
+                    exit 1
+                  fi
+                  grep -qE 'libcef[.]so[[:space:]]+=>[[:space:]]+/' <<< "$libraries"
+
+                  relocations=$(ldd -r "$binary" 2>&1)
+                  printf '%s\n' "$relocations"
+                  if [[ "$relocations" == *'undefined symbol'* || "$relocations" == *'not found'* ]]; then
+                    echo "::error::Installed binary has undefined symbols"
+                    exit 1
+                  fi
               env:
                   CI: 1
+                  CEF_FAMILY: ${{ matrix.family }}
+
+            - uses: actions/upload-artifact@v7
+              if: ${{ matrix.family == 'opensuse' && matrix.upload_artifacts }}
+              with:
+                  name: casparcg-server-${{ matrix.distribution }}-${{ matrix.arch }}
+                  path: build/staging
+                  if-no-files-found: error
+
+            # Only successful full builds establish a baseline; failed builds never do.
+            - name: Record successful alternate-platform full build
+              if: ${{ !matrix.full_build && env.FULL_BUILD == 'true' && steps.previous-build.outputs.cache-hit != 'true' }}
+              run: |
+                  mkdir -p .cache/system-build-baseline
+                  printf '%s\n' "$DEPENDENCY_FINGERPRINT" > .cache/system-build-baseline/fingerprint
+              env:
+                  DEPENDENCY_FINGERPRINT: ${{ steps.dependencies.outputs.fingerprint }}
+
+            - name: Save successful alternate-platform full-build baseline
+              if: ${{ !matrix.full_build && env.FULL_BUILD == 'true' && steps.previous-build.outputs.cache-hit != 'true' }}
+              uses: actions/cache/save@v5
+              with:
+                  path: .cache/system-build-baseline
+                  key: ${{ steps.previous-build.outputs.cache-primary-key }}

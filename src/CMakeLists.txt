@@ -14,6 +14,7 @@ set(CASPARCG_DOWNLOAD_MIRROR https://github.com/CasparCG/dependencies/releases/d
 set(CASPARCG_DOWNLOAD_CACHE ${CMAKE_CURRENT_BINARY_DIR}/external CACHE STRING "Download cache directory for cmake ExternalProjects")
 
 option(ENABLE_HTML "Enable HTML module, require CEF" ON)
+option(CASPARCG_CHECK_DEPENDENCIES_ONLY "Check Linux system dependencies without building CasparCG" OFF)
 
 set(DIAG_FONT_PATH "LiberationMono-Regular.ttf" CACHE STRING
     "Path to font that will be used to load diag font at runtime. By default
@@ -57,6 +58,14 @@ else ()
     message(STATUS "Target build type: ${CMAKE_BUILD_TYPE}")
     message(STATUS "Build Version: ${CONFIG_VERSION_MAJOR}.${CONFIG_VERSION_MINOR}.${CONFIG_VERSION_BUG} ${CONFIG_VERSION_TAG} (Revision: ${CONFIG_VERSION_GIT_HASH})")
 endif ()
+
+if(CASPARCG_CHECK_DEPENDENCIES_ONLY)
+    if(MSVC)
+        message(FATAL_ERROR "Dependency-only checks are supported only for Linux builds")
+    endif()
+    include(CheckLinuxDependencies)
+    return()
+endif()
 
 IF(ENABLE_VULKAN)
     add_definitions(-DENABLE_VULKAN)
