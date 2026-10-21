@@ -223,6 +223,9 @@ boost::tribool has_valid_extension(const boost::filesystem::path& filename)
 
 bool has_invalid_protocol(const std::wstring& filename) { return boost::algorithm::istarts_with(filename, L"ndi://"); }
 
+// The OMT producer plays these.
+bool is_omt_url(const std::wstring& filename) { return boost::algorithm::istarts_with(filename, L"omt://"); }
+
 bool is_readable(const boost::filesystem::path& filename)
 {
     boost::filesystem::ifstream file(filename);
@@ -286,7 +289,7 @@ spl::shared_ptr<core::frame_producer> create_producer(const core::frame_producer
         } else {
             return core::frame_producer::empty();
         }
-    } else if (!has_valid_extension(path) || has_invalid_protocol(path)) {
+    } else if (!has_valid_extension(path) || has_invalid_protocol(path) || is_omt_url(path)) {
         return core::frame_producer::empty();
     }
 

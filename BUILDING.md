@@ -18,6 +18,26 @@ During the build, you can specify the CMake option `CASPARCG_DOWNLOAD_MIRROR` to
 If you want to be able to build CasparCG offline, you may need to manually seed this cache. You can do so by placing the correct tar.gz or zip into a folder and using `CASPARCG_DOWNLOAD_CACHE` to tell CMake where to find it.
 You can figure out which files you need by looking at each of the `ExternalProject_Add` function calls inside of [Bootstrap_Linux.cmake](./src/CMakeModules/Bootstrap_Linux.cmake) or [Bootstrap_Windows.cmake](./src/CMakeModules/Bootstrap_Windows.cmake). Some of the ones listed are optional, depending on other CMake flags.
 
+# Open Media Transport (OMT)
+
+The OMT runtime (libvmx, libomtnet and libomt) is cloned from https://github.com/openmediatransport at the revisions pinned in [OMT.cmake](./src/CMakeModules/OMT.cmake), and compiled as part of the CasparCG build. This works the same way on Windows and Linux, and the result is bundled next to the server. The sources are cloned into `omt-src` inside the build directory. The first build needs network access: `git` clones the sources from GitHub, and `dotnet` restores its NuGet packages from nuget.org, among them the Native AOT compiler and the reference assemblies. `CASPARCG_DOWNLOAD_MIRROR` and `CASPARCG_DOWNLOAD_CACHE` do not apply to it.
+
+This needs, in addition to the normal build tools:
+
+- The .NET SDK, version 8.0 or newer (`dotnet`)
+- clang (`clang++`). On Windows this is LLVM, or the 'C++ Clang tools for Windows' component of Visual Studio. It must be in `PATH`.
+- Linux only: the zlib development package (`zlib1g-dev`)
+
+`./tools/linux/install-dependencies` installs all of these on Ubuntu. Configure with `-DOMT_BUILD_FROM_SOURCE=OFF` to skip the OMT runtime. The server still builds and runs, but OMT can only be used once libomt has been installed some other way.
+
+The server only loads libomt when OMT is used, from the system library path or from the folder it was started from, so libomt can also be an optional package that is installed next to the server. Without it the server works, and an OMT consumer or producer reports that libomt was not found.
+
+On Ubuntu 24.04 and later, `./tools/linux/deb/build-libomt` builds that package from the current commit, and `sudo apt install ./dist/deb/libomt_*.deb` installs it. The server packages suggest it. Debian has no .NET SDK in its archive, so the package is not built there. It builds the same OMT runtime at the same revisions, with `tools/linux/libomt/CMakeLists.txt`, so it needs the same network access and is not suitable for a Launchpad PPA build. When the revisions in [OMT.cmake](./src/CMakeModules/OMT.cmake) change, change the version in `tools/linux/deb/libomt/debian/changelog` to the version of libomt too.
+
+To move to a newer upstream version, change the revisions at the top of [OMT.cmake](./src/CMakeModules/OMT.cmake), or override them with `-DOMT_LIBVMX_REVISION`, `-DOMT_LIBOMTNET_REVISION` and `-DOMT_LIBOMT_REVISION`.
+
+At runtime on Linux, libomt loads ICU (`libicuuc` and `libicui18n`) and Avahi (`libavahi-client`) from the system.
+
 # Windows
 
 ## Building distributable
@@ -95,6 +115,8 @@ If all goes to plan, a folder called 'staging' has been created with everything 
 -DUSE_STATIC_BOOST=ON - (Linux only, default OFF) statically link against Boost.
 
 -DUSE_SYSTEM_CEF=OFF - (Linux only, default ON) use the version of CEF from your OS. This expects to be using builds from https://launchpad.net/~casparcg/+archive/ubuntu/ppa
+
+-DOMT_BUILD_FROM_SOURCE=OFF - (default ON) do not build the OMT runtime, see the Open Media Transport section above.
 
 -DENABLE_AVX2=ON (Linux only, default OFF) Enable the AVX and AVX2 instruction sets (requires a CPU that supports it)
 

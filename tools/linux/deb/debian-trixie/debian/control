@@ -65,5 +65,6 @@ Vcs-Browser: https://github.com/CasparCG/server/
 Package: casparcg-server-beta
 Pre-Depends: ${misc:Pre-Depends}
 Depends: fonts-liberation, ${misc:Depends}, ${shlibs:Depends}
+Suggests: libomt
 Architecture: amd64 arm64
 Description: This build will be broken, as CEF will not be packaged correctly inside of it. This exists simply as a build check

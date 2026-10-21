@@ -184,6 +184,7 @@ jobs:
                     -DCMAKE_BUILD_TYPE=Release \
                     -DDIAG_FONT_PATH="/usr/share/fonts/liberation/LiberationMono-Regular.ttf" \
                     -DENABLE_HTML=OFF \
+                    -DOMT_BUILD_FROM_SOURCE=OFF \
                     -G Ninja
 
                   cmake --build build

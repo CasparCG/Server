@@ -113,6 +113,8 @@ casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/swscale-9.dll")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/ffmpeg.exe")
 casparcg_add_runtime_dependency("${FFMPEG_BIN_PATH}/ffprobe.exe")
 
+include(OMT)
+
 get_property(is_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 
 set(EXTERNAL_CMAKE_ARGS "")

@@ -6,6 +6,7 @@ apt-get install -yq --no-install-recommends \
   cmake \
   ninja-build \
   curl \
+  dotnet-sdk-8.0 \
   bzip2 \
   clang \
   g++ \

@@ -1,0 +1,104 @@
+name: Build libomt deb
+
+on:
+    push:
+        # branches: [ "master" ]
+    pull_request:
+        branches: ["master"]
+
+# The optional package that enables OMT in the server. Debian has no .NET SDK in its archive, so only
+# the Ubuntu releases are built here.
+jobs:
+    build:
+        name: libomt on ${{ matrix.name }} ${{ matrix.arch }}
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { name: ubuntu-noble, image: "ubuntu:24.04", arch: amd64, os: ubuntu-latest }
+                    - { name: ubuntu-resolute, image: "ubuntu:26.04", arch: amd64, os: ubuntu-latest }
+                    # The OMT runtime has not been built on arm64 before.
+                    - { name: ubuntu-resolute, image: "ubuntu:26.04", arch: arm64, os: ubuntu-24.04-arm, experimental: true }
+
+        runs-on: ${{ matrix.os }}
+        container: ${{ matrix.image }}
+        continue-on-error: ${{ matrix.experimental == true }}
+        defaults:
+            run:
+                shell: bash
+
+        steps:
+            # Before the checkout, so that it gets a real git checkout, which the build needs
+            - name: Install git
+              run: |
+                  apt-get update
+                  apt-get -y install git ca-certificates
+              env:
+                  DEBIAN_FRONTEND: noninteractive
+
+            - uses: actions/checkout@v7
+
+            - name: Build the deb package
+              run: ./tools/linux/deb/build-libomt
+              env:
+                  CI: 1
+
+            - uses: actions/upload-artifact@v7
+              with:
+                  name: libomt-deb-${{ matrix.name }}-${{ matrix.arch }}
+                  path: dist/deb/*.deb
+
+    # In a clean container, to see that the package finds every library it needs by itself.
+    install:
+        name: Install libomt on ${{ matrix.name }} ${{ matrix.arch }}
+        needs: build
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - { name: ubuntu-noble, image: "ubuntu:24.04", arch: amd64, os: ubuntu-latest }
+                    - { name: ubuntu-resolute, image: "ubuntu:26.04", arch: amd64, os: ubuntu-latest }
+                    - { name: ubuntu-resolute, image: "ubuntu:26.04", arch: arm64, os: ubuntu-24.04-arm, experimental: true }
+
+        runs-on: ${{ matrix.os }}
+        container: ${{ matrix.image }}
+        continue-on-error: ${{ matrix.experimental == true }}
+        defaults:
+            run:
+                shell: bash
+
+        steps:
+            - uses: actions/download-artifact@v4
+              with:
+                  name: libomt-deb-${{ matrix.name }}-${{ matrix.arch }}
+
+            - name: Show what the package contains
+              run: |
+                  dpkg-deb --info ./libomt_*.deb
+                  dpkg-deb --contents ./libomt_*.deb
+
+            - name: Install the package
+              run: |
+                  apt-get update
+                  apt-get -y install ./libomt_*.deb python3
+              env:
+                  DEBIAN_FRONTEND: noninteractive
+
+            - name: Check that every library is found
+              run: |
+                  for library in libomt.so libvmx.so; do
+                      ldd "$(dpkg -L libomt | grep "/$library\$")" | tee ldd.txt
+                      if grep 'not found' ldd.txt; then exit 1; fi
+                  done
+
+            # The server looks libomt up by its name on the library path of the system, and libomt needs
+            # ICU, libvmx and the functions that the server calls
+            - name: Check that the server can load libomt
+              run: |
+                  python3 - <<'PYTHON'
+                  import ctypes
+                  libomt = ctypes.CDLL("libomt.so")
+                  ctypes.CDLL("libvmx.so")
+                  for name in ("omt_discovery_getaddresses", "omt_receive_create", "omt_receive", "omt_send_create", "omt_send"):
+                      getattr(libomt, name)
+                  PYTHON

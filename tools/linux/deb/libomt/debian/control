@@ -1,0 +1,27 @@
+Source: libomt
+Section: libs
+Priority: optional
+Maintainer: Mihai <insider.vasiloiu5@gmail.com>
+Standards-Version: 4.6.0.1
+Build-Depends: ca-certificates,
+               clang,
+               cmake,
+               debhelper-compat (= 13),
+               dotnet-sdk-8.0 | dotnet-sdk-9.0 | dotnet-sdk-10.0,
+               git,
+               libbrotli-dev,
+               libicu-dev,
+               libssl-dev,
+               zlib1g-dev
+Homepage: https://github.com/openmediatransport
+
+Package: libomt
+Architecture: amd64 arm64
+Depends: ${misc:Depends}, ${shlibs:Depends}, ${libomt:Icu}, libavahi-client3
+Description: Open Media Transport runtime library, for CasparCG Server
+ libomt is the C library of Open Media Transport (OMT), a protocol for sending
+ video and audio with low latency over a local network. libvmx is the video
+ codec that it uses.
+ .
+ CasparCG Server loads libomt for its OMT consumer and producer. Install this
+ package to enable OMT in the server, no rebuild of the server is needed.

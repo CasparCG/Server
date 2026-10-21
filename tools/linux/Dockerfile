@@ -39,6 +39,8 @@ FROM docker.io/ubuntu:noble
 			libc++1 \
 			libnss3 \
 			fontconfig \
+			libavahi-client3 \
+			libicu74 \
 			libglvnd0 \
 			libgl1 \
 			libglx0 \

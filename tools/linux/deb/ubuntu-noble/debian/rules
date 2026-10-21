@@ -3,7 +3,7 @@
 	dh $@ --sourcedirectory=src --buildsystem=cmake
 
 override_dh_auto_configure:
-	dh_auto_configure -- -DDIAG_FONT_PATH=/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf -DCASPARCG_BINARY_NAME=casparcg-server-beta
+	dh_auto_configure -- -DDIAG_FONT_PATH=/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf -DCASPARCG_BINARY_NAME=casparcg-server-beta -DOMT_BUILD_FROM_SOURCE=OFF
 
 # Generate and install manual page
 debian/casparcg-server-beta.1: debian/casparcg.txt2man

@@ -1,0 +1,34 @@
+#!/usr/bin/make -f
+include /usr/share/dpkg/architecture.mk
+
+export DOTNET_CLI_TELEMETRY_OPTOUT = 1
+export DOTNET_NOLOGO = 1
+
+# libomt loads the ICU library of the system when it starts, so dpkg-shlibdeps cannot see it.
+# libicu-dev is a build dependency and depends on the runtime package of the same ICU.
+ICU_RUNTIME := $(shell dpkg-query --show --showformat='$${Depends}' libicu-dev | tr ',' '\n' | grep -o 'libicu[0-9][0-9]*' | head -n 1)
+
+%:
+	dh $@ --sourcedirectory=tools/linux/libomt --buildsystem=cmake
+
+override_dh_auto_configure:
+	dh_auto_configure -- -DCMAKE_BUILD_TYPE=Release
+
+# There are no tests, and no useful debug information in a Native AOT library.
+override_dh_auto_test:
+override_dh_dwz:
+override_dh_strip:
+
+# The libraries have no soname, the server opens libomt by its file name.
+override_dh_makeshlibs:
+
+# The MIT license of the three projects asks for its notice to come with the libraries.
+override_dh_auto_install:
+	dh_auto_install
+	for library in libvmx libomtnet libomt; do \
+		install -Dm644 obj-$(DEB_HOST_GNU_TYPE)/omt-src/$$library/LICENSE.txt \
+			debian/libomt/usr/share/doc/libomt/license-$$library.txt; \
+	done
+
+override_dh_gencontrol:
+	dh_gencontrol -- -Vlibomt:Icu="$(ICU_RUNTIME)"

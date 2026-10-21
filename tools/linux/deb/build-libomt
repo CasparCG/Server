@@ -1,0 +1,67 @@
+#!/bin/bash
+# Builds the libomt deb package from the current commit, on Ubuntu 24.04 or later.
+#
+# Run it from a checkout, as a normal user (sudo installs the build dependencies) or as root, for
+# example in a container. The package is written to dist/deb.
+#
+#   tools/linux/deb/build-libomt [--skip-deps] [dpkg-buildpackage options]
+#
+# --skip-deps          do not install the build dependencies, they are already there
+# dpkg-buildpackage options  for example -d to ignore missing build dependencies
+#
+# Only committed changes are built, because the source is made with git archive. The build clones
+# the OMT sources and restores NuGet packages, so it needs network access. Debian has no .NET SDK
+# in its archive, so on Debian the SDK has to be installed from Microsoft first.
+
+set -euo pipefail
+
+repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+out="$repo/dist/deb"
+
+install_deps=1
+if [ "${1:-}" = "--skip-deps" ]; then
+    install_deps=0
+    shift
+fi
+
+# The checkout can belong to another user, for example in a container job.
+repo_git() {
+    git -c safe.directory="$repo" -C "$repo" "$@"
+}
+
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then
+        "$@"
+    else
+        sudo "$@"
+    fi
+}
+
+# The first line of the changelog is "libomt (version) distribution; urgency=...". dpkg-parsechangelog
+# would do, but it is part of dpkg-dev, which is not there before the build tools are installed.
+version=$(repo_git show HEAD:tools/linux/deb/libomt/debian/changelog | sed -n '1s/^[^ ]* (\([^)]*\)).*/\1/p')
+test -n "$version"
+
+# The source is the wrapper project, the two CMake modules that build the OMT runtime and the debian
+# directory, all of them from the current commit.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+source_dir="$work/libomt-$version"
+mkdir -p "$source_dir"
+
+repo_git archive HEAD tools/linux/libomt src/CMakeModules/OMT.cmake src/CMakeModules/CasparCG_Util.cmake |
+    tar --extract --directory "$source_dir"
+repo_git archive HEAD:tools/linux/deb/libomt debian |
+    tar --extract --directory "$source_dir"
+
+if [ "$install_deps" -eq 1 ]; then
+    export DEBIAN_FRONTEND=noninteractive
+    as_root apt-get update
+    as_root apt-get -y install build-essential debhelper devscripts dpkg-dev
+    (cd "$source_dir" && as_root apt-get -y build-dep .)
+fi
+
+(cd "$source_dir" && dpkg-buildpackage --build=binary --no-sign "$@")
+
+mkdir -p "$out"
+cp -v "$work"/libomt_*.deb "$out/"

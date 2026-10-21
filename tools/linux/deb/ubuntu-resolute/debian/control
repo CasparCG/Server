@@ -42,6 +42,7 @@ Vcs-Browser: https://github.com/CasparCG/server/
 Package: casparcg-server-beta
 Pre-Depends: ${misc:Pre-Depends}
 Depends: fonts-liberation, casparcg-cef-api15000, ${misc:Depends}, ${shlibs:Depends}
+Suggests: libomt
 Architecture: amd64 arm64
 Description: layered real-time video compositor to multiple outputs
  Play out professional graphics, audio and video to multiple outputs as a

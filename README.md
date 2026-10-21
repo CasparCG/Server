@@ -78,3 +78,4 @@ CasparCG Server uses the following third party libraries:
 - SFML (http://www.sfml-dev.org/) under the zlib/libpng License.
 - GLEW (http://glew.sourceforge.net) under the modified BSD License.
 - boost (http://www.boost.org/) under the Boost Software License, version 1.0.
+- libomt, libomtnet and libvmx of Open Media Transport (https://github.com/openmediatransport) under the MIT License.
