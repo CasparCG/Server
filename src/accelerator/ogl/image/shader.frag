@@ -92,16 +92,11 @@ vec3 ContrastSaturationBrightness(vec4 color, float brt, float sat, float con)
 
     vec3 LumCoeff = luma_coeff.bgr;
 
-    if (color.a > 0.0)
-        color.rgb /= color.a;
-
     vec3 AvgLumin = vec3(AvgLumR, AvgLumG, AvgLumB);
     vec3 brtColor = color.rgb * brt;
     vec3 intensity = vec3(dot(brtColor, LumCoeff));
     vec3 satColor = mix(intensity, brtColor, sat);
     vec3 conColor = mix(AvgLumin, satColor, con);
-
-    conColor.rgb *= color.a;
 
     return conColor;
 }
@@ -671,6 +666,13 @@ void main()
         color.rgb *= color.a;
     if (chroma)
         color = chroma_key(color);
+
+    // The grading chain is non-linear, so it belongs on the surface colour: C(a*c) != a*C(c).
+    bool graded = cdl_enable || white_balance || lmg_enable || hue_shift_enable ||
+                  tonebalance_enable || split_tone_enable || levels || csb;
+    if (graded && color.a > 0.0)
+        color.rgb /= color.a;
+
     // Per-channel uniforms arrive in RGB order and are swizzled to the working order
     // here -- see the channel-order note above the grading functions.
     if (cdl_enable)
@@ -690,6 +692,10 @@ void main()
         color.rgb = LevelsControl(color.rgb, min_input, gamma, max_input, min_output, max_output);
     if(csb)
         color.rgb = ContrastSaturationBrightness(color, brt, sat, con);
+
+    if (graded)
+        color.rgb *= color.a;
+
     if(has_local_key)
         color *= texture(local_key, TexCoord2.st).r;
     if(has_layer_key)
